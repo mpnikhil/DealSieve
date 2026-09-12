@@ -1,0 +1,7 @@
+{
+  "status": "NEAR",
+  "immediate_capex": 90000,
+  "normalized_cap_rate": [0.076, 0.078],
+  "dscr": [1.28, 1.32],
+  "max_viable_price": [1190000, 1225000]
+}

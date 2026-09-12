@@ -1,0 +1,95 @@
+{
+  "filename": "Power_Inn_Property_Condition_Report.pdf",
+  "document_type": "inspection_report",
+  "summary": "Property condition assessment of 8330 Power Inn Road (site visit 2026-06-18). The roof is the original 2001 built-up membrane with no documented replacement, showing ponding at the NE corner and membrane blistering with an open seam near suite 105; replacement is recommended within 12-24 months, $85,000-$95,000. Two of the eight rooftop HVAC units (suites 103 and 106) are original 1998 units beyond typical service life, operational at inspection, budgeted for replacement in 3-5 years at $14,000-$18,000 each. Electrical and plumbing were serviceable with no immediate needs. Paving needs a seal coat and restripe within 3-5 years, $6,000-$8,000.",
+  "findings": [
+    {
+      "topic": "Roof age",
+      "value": "Original built-up membrane installed 2001; no documented replacement",
+      "detail": "Well past the typical 20-year service life for this roof type.",
+      "severity": "high",
+      "confidence": 0.95,
+      "page": 3,
+      "image_ref": "image 1"
+    },
+    {
+      "topic": "Roof ponding",
+      "value": "Ponding water at the NE corner, approx. 1/2 inch after 48 dry hours",
+      "detail": "Indicates a drainage deficiency at that corner of the roof.",
+      "severity": "high",
+      "confidence": 0.9,
+      "page": 3,
+      "image_ref": "image 1"
+    },
+    {
+      "topic": "Roof membrane condition",
+      "value": "Membrane blistering and an open seam near the suite 105 HVAC curb",
+      "detail": "Blistering indicates trapped moisture beneath the membrane; the open seam is an active leak risk.",
+      "severity": "high",
+      "confidence": 0.9,
+      "page": 4,
+      "image_ref": "image 2"
+    },
+    {
+      "topic": "HVAC vintages",
+      "value": "8 packaged rooftop units: 6 units installed 2014-2019 in good order; suites 103 and 106 have original 1998 units beyond typical service life, operational at inspection",
+      "detail": "Budget replacement of the two 1998 units within 3-5 years, $14,000-$18,000 each.",
+      "severity": "medium",
+      "confidence": 0.9,
+      "page": 5,
+      "image_ref": "image 3"
+    },
+    {
+      "topic": "Paving",
+      "value": "Asphalt paving shows typical wear; no structural failures observed",
+      "detail": "Recommend seal coat and restripe within 3-5 years, $6,000-$8,000.",
+      "severity": "low",
+      "confidence": 0.85,
+      "page": 6,
+      "image_ref": null
+    }
+  ],
+  "answers": [
+    {
+      "request_topic": "Roof age",
+      "answer": "The roof is the original built-up membrane installed in 2001, with no documented replacement since. Ponding and membrane blistering were observed; replacement is recommended within 12-24 months, budget $85,000-$95,000.",
+      "resolves": true
+    }
+  ],
+  "capex_items": [
+    {
+      "item": "Roof replacement (original 2001 built-up membrane)",
+      "low": 85000,
+      "high": 95000,
+      "urgency": "immediate",
+      "source_document": "Power_Inn_Property_Condition_Report.pdf",
+      "location": "page 4",
+      "evidence_id": null
+    },
+    {
+      "item": "HVAC replacement, suites 103 & 106 (1998 units)",
+      "low": 28000,
+      "high": 36000,
+      "urgency": "deferred",
+      "source_document": "Power_Inn_Property_Condition_Report.pdf",
+      "location": "page 6",
+      "evidence_id": null
+    },
+    {
+      "item": "Paving seal coat and restripe",
+      "low": 6000,
+      "high": 8000,
+      "urgency": "deferred",
+      "source_document": "Power_Inn_Property_Condition_Report.pdf",
+      "location": "page 6",
+      "evidence_id": null
+    }
+  ],
+  "red_flags": [
+    "Roof at end of service life; ponding indicates drainage deficiency"
+  ],
+  "images_reviewed": 3,
+  "image_paths": [],
+  "text_chars": 5839,
+  "model_backend": null
+}
