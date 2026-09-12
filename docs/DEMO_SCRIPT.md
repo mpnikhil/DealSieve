@@ -48,7 +48,7 @@ Deal #:         113
 Status:         (new) -> WATCH
 Normalized cap: 6.42%
 DSCR:           1.02x
-Max viable:     $1,285,953
+Max viable:     $1,285,946
 Distance:       17.04%
 Human notified: no
 ```
@@ -56,7 +56,7 @@ Human notified: no
 **Then switch to the dashboard:** overview page — deal #113 sitting in the WATCH row, distance-to-viability bar; click through to the deal detail page and show the Broker vs. DealSieve table (broker 8.13% cap / $126,000 NOI vs. DealSieve 6.42% cap / $99,575 NOI after the tax reset, vacancy floor, management fee and capex reserve) and the Viability Frontier card.
 
 **Voice-over:**
-> "A broker email arrives — asking $1.55 million, an 8.13% cap on paper. DealSieve extracts the numbers, resets the property tax, adds a management fee and a capex reserve the broker's pro forma left out, and gets a 6.42% normalized cap, a 1.02 DSCR. WATCH. And it computes something the broker's spreadsheet never will: the exact price where this would pass — $1,285,953, seventeen percent below asking. No one is notified. That's not a bug. That's the product working."
+> "A broker email arrives — asking $1.55 million, an 8.13% cap on paper. DealSieve extracts the numbers, resets the property tax, adds a management fee and a capex reserve the broker's pro forma left out, and gets a 6.42% normalized cap, a 1.02 DSCR. WATCH. And it computes something the broker's spreadsheet never will: the exact price where this would pass — $1,285,946, seventeen percent below asking. No one is notified. That's not a bug. That's the product working."
 
 ---
 

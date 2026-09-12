@@ -25,3 +25,5 @@ frontend/dist/
 # agentcore build artifacts
 .bedrock_agentcore.yaml
 .bedrock_agentcore/
+data/documents/
+data/outbox/
