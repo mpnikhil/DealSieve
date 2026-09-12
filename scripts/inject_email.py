@@ -11,6 +11,7 @@ from decimal import Decimal
 from pathlib import Path
 
 from dealsieve.ingestion.email import parse_eml
+from dealsieve.models.backend import default_script_for
 from dealsieve.notifications import get_notifier
 from dealsieve.persistence import Repo
 from dealsieve.pipeline import process_inbound
@@ -42,7 +43,8 @@ def main(argv: list[str] | None = None) -> int:
     notifier = get_notifier()
 
     message = parse_eml(path)
-    outcome = process_inbound(message, repo=repo, policy=policy, notifier=notifier)
+    script = default_script_for(path)
+    outcome = process_inbound(message, repo=repo, policy=policy, notifier=notifier, script=script)
 
     print(f"Message:        {path.name}")
     print(f"Opportunity:    {outcome.opportunity_id or '(none)'}")

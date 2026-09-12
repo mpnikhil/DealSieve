@@ -149,7 +149,9 @@ def test_script_02_crosses_into_review_and_interrupts_exactly_once(
 
     draft = fake_repo.list_drafts(opportunity_id=outcome.opportunity_id)[0]
     assert draft.status == "pending" and len(draft.questions) == 3
-    assert draft.subject == "Re: Re: Off-market"
+    # The inbound message's subject is already a reply ("Re: Off-market"); the draft must not
+    # double the prefix into "Re: Re: Off-market".
+    assert draft.subject == "Re: Off-market"
 
 
 def test_a_second_message_on_the_same_opportunity_does_not_recreate_it(

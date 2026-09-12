@@ -3,10 +3,13 @@
 from __future__ import annotations
 
 import os
+from pathlib import Path
 
 from strands.models import Model
 
 from dealsieve.schemas import ModelPurpose
+
+REPO_ROOT = Path(__file__).resolve().parents[2]
 
 DEFAULT_BACKEND = "cli"
 DEFAULT_CLI_PROVIDER = "claude"
@@ -43,6 +46,28 @@ def _model_for(prefix: str, purpose: ModelPurpose, default: str | None) -> str |
 
 def cli_provider() -> str:
     return (_env("DEALSIEVE_CLI_PROVIDER", DEFAULT_CLI_PROVIDER) or DEFAULT_CLI_PROVIDER).lower()
+
+
+def default_script_for(source_path: str | os.PathLike[str] | None) -> str | None:
+    """Best-effort scripted-backend script path derived from an ingestion source file.
+
+    Only applies when the backend is `scripted` and `DEALSIEVE_SCRIPT` is not already set (an
+    explicit env var always wins). When both hold, guesses `fixtures/scripted/<stem>.json` from
+    `source_path`'s filename stem (e.g. `fixtures/emails/01_initial_offer.eml` ->
+    `fixtures/scripted/01_initial_offer.json`) and returns that path, relative to the repo root
+    (the parent of the `dealsieve` package), if the file exists. Returns None otherwise.
+    """
+    if not source_path:
+        return None
+    if selected_backend() != "scripted":
+        return None
+    if _env("DEALSIEVE_SCRIPT"):
+        return None
+    stem = Path(source_path).stem
+    relative = f"fixtures/scripted/{stem}.json"
+    if (REPO_ROOT / relative).is_file():
+        return relative
+    return None
 
 
 def backend_name() -> str:
@@ -109,4 +134,4 @@ def get_model(purpose: ModelPurpose = ModelPurpose.ACQUISITION, *, script: str |
     return ScriptedModel(resolved)
 
 
-__all__ = ["backend_name", "cli_provider", "get_model", "selected_backend"]
+__all__ = ["backend_name", "cli_provider", "default_script_for", "get_model", "selected_backend"]

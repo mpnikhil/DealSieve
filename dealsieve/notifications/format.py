@@ -22,6 +22,7 @@ from dealsieve.schemas import (
 
 _LABEL_WIDTH = 17
 _VALUE_WIDTH = 17
+_MAX_UNRESOLVED = 4
 
 _ACTIONS: list[NotificationAction] = [
     NotificationAction(label="Review", action="review"),
@@ -112,9 +113,13 @@ def format_threshold_alert(
     if skeptic is not None:
         lines.append("")
         lines.append("Still unresolved:")
-        lines.extend(
-            f"- {concern.topic}" for concern in skeptic.concerns if concern.evidence_status in ("missing", "weak")
-        )
+        unresolved = [
+            concern.topic for concern in skeptic.concerns if concern.evidence_status in ("missing", "weak")
+        ]
+        shown, overflow = unresolved[:_MAX_UNRESOLVED], unresolved[_MAX_UNRESOLVED:]
+        lines.extend(f"- {topic}" for topic in shown)
+        if overflow:
+            lines.append(f"- +{len(overflow)} more in the dashboard")
 
     body = "\n".join(lines)
 

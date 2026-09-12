@@ -22,6 +22,7 @@ def _ensure_repo_root_importable() -> None:
 def _cmd_ingest(args: argparse.Namespace) -> int:
     from dealsieve.ingestion.email import parse_eml
     from dealsieve.ingestion.text import from_text
+    from dealsieve.models.backend import default_script_for
     from dealsieve.notifications import get_notifier
     from dealsieve.persistence import Repo
     from dealsieve.pipeline import process_inbound
@@ -42,7 +43,8 @@ def _cmd_ingest(args: argparse.Namespace) -> int:
     else:
         message = from_text(path.read_text(encoding="utf-8"))
 
-    outcome = process_inbound(message, repo=repo, policy=policy, notifier=notifier)
+    script = default_script_for(path)
+    outcome = process_inbound(message, repo=repo, policy=policy, notifier=notifier, script=script)
     print(outcome.model_dump_json(indent=2))
     return 0
 

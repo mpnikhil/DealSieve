@@ -20,6 +20,7 @@ from typing import Any
 
 from dealsieve.agents.acquisition import build_acquisition_agent, render_message_prompt
 from dealsieve.agents.tools import (
+    MAX_BROKER_QUESTIONS,
     ProcessingSession,
     perform_draft_broker_questions,
     perform_notify_human,
@@ -84,7 +85,7 @@ def _safety_net(session: ProcessingSession) -> list[str]:
             actions.append("skeptic review run by safety net")
 
     if session.threshold_crossed and session.draft is None:
-        questions = suggested_questions(session.skeptic_report)
+        questions = suggested_questions(session.skeptic_report)[:MAX_BROKER_QUESTIONS]
         if questions:
             result = perform_draft_broker_questions(session, questions, actor=Actor.SYSTEM)
             if "skipped" not in result:

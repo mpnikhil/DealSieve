@@ -319,6 +319,52 @@ def test_format_threshold_alert_handles_no_previous_run() -> None:
     assert "Still unresolved" not in notification.body
 
 
+def test_format_threshold_alert_caps_unresolved_list_at_four() -> None:
+    opportunity = _opportunity()
+    previous_run = _run(
+        price=Decimal("1550000"),
+        cap_rate=Decimal("0.0642"),
+        dscr=Decimal("1.05"),
+        status=OpportunityStatus.WATCH,
+        cap_passed=False,
+        dscr_passed=False,
+    )
+    new_run = _run(
+        price=Decimal("1250000"),
+        cap_rate=Decimal("0.0827"),
+        dscr=Decimal("1.43"),
+        status=OpportunityStatus.REVIEW,
+        cap_passed=True,
+        dscr_passed=True,
+    )
+    skeptic = SkepticReport(
+        opportunity_id="opp_power_inn",
+        run_id="run_after",
+        verdict="proceed_with_questions",
+        summary="Five open items, all unresolved.",
+        concerns=[
+            SkepticConcern(
+                topic=topic,
+                severity="medium",
+                why_it_matters="Material to the decision.",
+                evidence_status="missing",
+            )
+            for topic in ["roof age", "Phase I environmental", "CAM reconciliation", "lease rollover", "financing"]
+        ],
+    )
+
+    notification = format_threshold_alert(opportunity, previous_run, new_run, skeptic)
+
+    unresolved_lines = notification.body.splitlines()[notification.body.splitlines().index("Still unresolved:") + 1 :]
+    assert unresolved_lines == [
+        "- roof age",
+        "- Phase I environmental",
+        "- CAM reconciliation",
+        "- lease rollover",
+        "- +1 more in the dashboard",
+    ]
+
+
 def test_console_notifier_render_box_includes_actions() -> None:
     opportunity = _opportunity()
     previous_run = _run(

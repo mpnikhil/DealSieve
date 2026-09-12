@@ -482,6 +482,14 @@ def suggested_questions(report: SkepticReport | None) -> list[str]:
 # --------------------------------------------------------------------------- broker draft
 
 
+MAX_BROKER_QUESTIONS = 5
+
+
+def _reply_subject(base: str) -> str:
+    """Prepend "Re: " unless `base` is already a reply subject (case-insensitive)."""
+    return base if base.lower().startswith("re:") else f"Re: {base}"
+
+
 def _draft_body(opp: Opportunity, questions: list[str]) -> str:
     greeting = f"Hi {opp.broker_name.split()[0]}," if opp.broker_name else "Hi,"
     numbered = "\n".join(f"{i}. {q}" for i, q in enumerate(questions, start=1))
@@ -506,11 +514,11 @@ def perform_draft_broker_questions(
     if session.run_after is not None and report.run_id != session.run_after.run_id:
         return {"skipped": "the skeptic report is not for the current underwriting run"}
 
-    cleaned = [q.strip() for q in questions if q and q.strip()]
+    cleaned = [q.strip() for q in questions if q and q.strip()][:MAX_BROKER_QUESTIONS]
     if not cleaned:
         return {"skipped": "no questions supplied"}
 
-    subject = f"Re: {session.message.subject}" if session.message.subject else f"Re: {opp.display_name}"
+    subject = _reply_subject(session.message.subject or opp.display_name)
     draft = OutboundDraft(
         opportunity_id=opp.opportunity_id,
         to_email=opp.broker_email,
@@ -703,6 +711,7 @@ def make_tools(session: ProcessingSession) -> list[Any]:
 
 
 __all__ = [
+    "MAX_BROKER_QUESTIONS",
     "ProcessingSession",
     "make_tools",
     "perform_draft_broker_questions",

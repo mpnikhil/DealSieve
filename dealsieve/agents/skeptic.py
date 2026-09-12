@@ -38,25 +38,36 @@ viability frontier were produced by a deterministic engine under a frozen policy
 given. Your concern is what the numbers are built on, not the numbers themselves.
 - Attack the evidence. For every material input, ask: who asserted this, in what document, and was \
 it ever verified? A number stated only by the seller's broker is not verified.
-- The usual killers in small-bay industrial, all of which are typically *absent* from an offering \
-memorandum and should be raised whenever they are not evidenced:
-  * roof age and replacement history (a $200k roof erases years of cash flow),
-  * a Phase I environmental report (industrial tenants: solvents, oil, machining, plating),
-  * CAM reconciliation for the trailing year (recoveries the broker assumes may not be collectible),
-  * lease rollover concentration and below-market or short-remaining-term leases,
-  * tenants related to the seller, or leases signed just before listing,
-  * deferred maintenance, unpermitted improvements, and actual vs. pro-forma occupancy.
+- Common killers in small-bay industrial worth raising WHEN this deal's own record actually leaves \
+them open (an offering memorandum silent on the point, a claim asserted without support, or sources \
+that disagree) include: roof age and replacement history (a $200k roof erases years of cash flow), a \
+Phase I environmental report (industrial tenants: solvents, oil, machining, plating), CAM \
+reconciliation for the trailing year, lease rollover concentration in a specific year, and tenants \
+related to the seller or leases signed just before listing. This list is not a checklist to fill in --  \
+raise an item only because THIS deal's record leaves it open, not because it is on the list.
+- Do not pad the list with generic diligence boilerplate. Skip standard items such as "rent collection \
+history" or "unpermitted improvements" unless the evidence in front of you specifically suggests a \
+problem with them (a stated delinquency, a visible unpermitted addition described in the OM, etc.).
+- Return AT MOST 5 concerns: only the ones material to a go/no-go decision on THIS deal, ordered from \
+most to least severe. If more than 5 things are genuinely open, keep the 5 most material and drop the \
+rest -- do not pick between two similarly minor items just to fill the list.
+- `topic`: a short noun phrase naming the issue only, e.g. "Roof age", "Phase I environmental", "CAM \
+reconciliation", "Lease rollover 2027" -- never a sentence.
 - Use exactly these evidence_status values: "missing" when nothing in the record addresses it, \
 "weak" when it is asserted without support, "contradicted" when sources disagree, "unverified" \
 when it is plausible but unchecked.
 - Severity: "high" if it could kill the deal or cost six figures, "medium" if it changes the price, \
 "low" if it is a diligence formality.
-- Give each concern a `question_for_broker`: one specific, answerable question.
+- Give each concern a `question_for_broker`: exactly one specific, answerable question -- never a \
+compound question joining two asks with "and".
 - Verdict: "reject" if something in the record already disqualifies it, "proceed_with_questions" \
 if it survives only once the gaps are answered (the usual answer), "proceed" if the record is \
 genuinely complete.
 - Be concrete and short. No hedging prose, no restating the financials.
 """
+
+_SEVERITY_ORDER = {"high": 0, "medium": 1, "low": 2}
+MAX_CONCERNS = 5
 
 
 class SkepticConcernOutput(BaseModel):
@@ -234,6 +245,11 @@ def run_skeptic(session: ProcessingSession) -> SkepticReport:
     if not isinstance(output, SkepticOutput):  # pragma: no cover - defensive
         raise ValueError("the skeptic agent did not return a SkepticOutput")
 
+    # Enforce the cap in code too: the model is asked for at most MAX_CONCERNS, ordered by
+    # severity, but never trust a model to honour a prompt instruction on its own.
+    ranked = sorted(output.concerns, key=lambda c: _SEVERITY_ORDER.get(c.severity, len(_SEVERITY_ORDER)))
+    capped = ranked[:MAX_CONCERNS]
+
     return SkepticReport(
         opportunity_id=run.opportunity_id,
         run_id=run.run_id,
@@ -247,7 +263,7 @@ def run_skeptic(session: ProcessingSession) -> SkepticReport:
                 evidence_status=c.evidence_status,
                 question_for_broker=c.question_for_broker,
             )
-            for c in output.concerns
+            for c in capped
         ],
     )
 
