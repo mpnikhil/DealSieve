@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from decimal import Decimal
+
 from dealsieve.policy import InvestmentPolicy
 from dealsieve.schemas import (
     ConstraintKind,
@@ -17,8 +19,25 @@ def evaluate_gates(
     normalized: NormalizedEconomics,
     financing: FinancingResult,
     policy: InvestmentPolicy,
+    *,
+    raw_price: Decimal | None = None,
+    raw_ltv: Decimal | None = None,
+    raw_normalized_cap_rate: Decimal | None = None,
+    raw_dscr: Decimal | None = None,
 ) -> list[GateResult]:
-    """Evaluate all hard gates in their stable contract order."""
+    """Evaluate all hard gates in their stable contract order.
+
+    Callers composing calculations pass the unrounded values. The result objects
+    remain the source of the presentation-ready ``actual`` fields.
+    """
+    gate_price = financing.purchase_price if raw_price is None else raw_price
+    gate_ltv = financing.ltv if raw_ltv is None else raw_ltv
+    gate_cap = (
+        normalized.normalized_cap_rate
+        if raw_normalized_cap_rate is None
+        else raw_normalized_cap_rate
+    )
+    gate_dscr = financing.dscr if raw_dscr is None else raw_dscr
     tenant_count_unknown = values.tenant_count is None
     largest_tenant_unknown = values.largest_tenant_pct is None
     tenant_count_passed = tenant_count_unknown or (
@@ -64,7 +83,7 @@ def evaluate_gates(
             comparator="<=",
             threshold=policy.purchase.absolute_max,
             actual=financing.purchase_price,
-            passed=financing.purchase_price <= policy.purchase.absolute_max,
+            passed=gate_price <= policy.purchase.absolute_max,
             price_dependent=True,
         ),
         GateResult(
@@ -74,7 +93,7 @@ def evaluate_gates(
             comparator="<=",
             threshold=policy.financing.max_ltv,
             actual=financing.ltv,
-            passed=financing.ltv <= policy.financing.max_ltv,
+            passed=gate_ltv <= policy.financing.max_ltv,
             price_dependent=True,
         ),
         GateResult(
@@ -84,7 +103,7 @@ def evaluate_gates(
             comparator=">=",
             threshold=policy.underwriting.min_normalized_cap_rate,
             actual=normalized.normalized_cap_rate,
-            passed=normalized.normalized_cap_rate >= policy.underwriting.min_normalized_cap_rate,
+            passed=gate_cap >= policy.underwriting.min_normalized_cap_rate,
             price_dependent=True,
         ),
         GateResult(
@@ -94,7 +113,7 @@ def evaluate_gates(
             comparator=">=",
             threshold=policy.underwriting.min_base_dscr,
             actual=financing.dscr,
-            passed=financing.dscr >= policy.underwriting.min_base_dscr,
+            passed=gate_dscr >= policy.underwriting.min_base_dscr,
             price_dependent=True,
         ),
     ]

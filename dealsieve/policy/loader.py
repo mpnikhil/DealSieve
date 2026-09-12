@@ -82,6 +82,7 @@ class Classification(_Frozen):
 
 class Outreach(_Frozen):
     auto_send_information_requests: bool
+    auto_follow_up_approved_threads: bool
     follow_up_after_days: int
     max_follow_ups: int
     always_require_approval: tuple[str, ...]

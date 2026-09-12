@@ -20,11 +20,15 @@ CREATE TABLE IF NOT EXISTS inbound_messages (
     subject         TEXT,
     thread_id       TEXT,
     opportunity_id  TEXT NULL REFERENCES opportunities(opportunity_id),
+    status          TEXT NOT NULL DEFAULT 'received',
+    error           TEXT,
+    updated_at      TEXT,
     json            TEXT NOT NULL
 );
 
 CREATE INDEX IF NOT EXISTS idx_inbound_messages_thread_id ON inbound_messages(thread_id);
 CREATE INDEX IF NOT EXISTS idx_inbound_messages_opportunity_id ON inbound_messages(opportunity_id);
+CREATE INDEX IF NOT EXISTS idx_inbound_messages_status ON inbound_messages(status);
 
 CREATE TABLE IF NOT EXISTS properties (
     property_id         TEXT PRIMARY KEY,

@@ -457,10 +457,14 @@ they define done. Everything in Phase 1 above still applies (ownership rules, no
   (`DILIGENCE_*`, `DOCUMENT_ANALYZED`, `CAPEX_ADJUSTED`, `OUTBOUND_BLOCKED`); `ModelPurpose.DOCUMENT`;
   `OpportunityDetail` gained `diligence_requests`, `document_analyses`, `inbound_messages`;
   `DashboardStats.open_diligence_requests`.
-- `config/investment_policy.yaml` + `policy/loader.py`: `outreach` (auto_send_information_requests,
-  follow_up_after_days=3, max_follow_ups=2, always_require_approval, from_name/from_email/signature) and `capex`
-  (count_as_immediate=[immediate, near_term], use_midpoint). `fixtures/policies/no_autosend_policy.yaml` is the
-  same policy with auto-send off.
+- `config/investment_policy.yaml` + `policy/loader.py`: `outreach` (auto_send_information_requests=false,
+  auto_follow_up_approved_threads=true, follow_up_after_days=3, max_follow_ups=2, always_require_approval,
+  from_name/from_email/signature) and `capex` (count_as_immediate=[immediate, near_term], use_midpoint).
+  `fixtures/policies/autosend_policy.yaml` is the same policy with auto-send on.
+- **Humans in the loop (decided 2026-09-12 evening):** the FIRST message of a diligence thread is drafted and waits
+  for a one-tap human approval (Telegram inline button or dashboard). Follow-ups on an approved thread go out
+  autonomously (they repeat approved questions). Money talk always waits. The threshold alert carries an
+  `approve` action for the pending request.
 - `pyproject.toml`: `fpdf2`, `pillow` added.
 
 ## Ownership
@@ -553,7 +557,8 @@ def compose_information_request(opp, requests, policy, *, in_reply_to, original_
     # kind information_request, requires_approval = not policy.outreach.auto_send_information_requests,
     # subject "Re: <original subject>" (no double Re:), body: greeting by broker first name, one sentence of context,
     # numbered questions, policy signature. questions = [r.question ...], request_ids = [...]
-def compose_follow_up(opp, requests, policy, *, follow_up_number, in_reply_to) -> OutboundDraft   # kind follow_up
+def compose_follow_up(opp, requests, policy, *, follow_up_number, in_reply_to) -> OutboundDraft
+    # kind follow_up; requires_approval = not policy.outreach.auto_follow_up_approved_threads (default: auto)
 def compose_credit_request(opp, amount: Decimal, rationale: str, policy, *, in_reply_to) -> OutboundDraft
     # kind credit_request, requires_approval True always
 def dispatch(draft, *, repo, policy, outbox, actor=Actor.AGENT) -> OutboundDraft
@@ -565,7 +570,9 @@ def dispatch(draft, *, repo, policy, outbox, actor=Actor.AGENT) -> OutboundDraft
     #    DILIGENCE_FOLLOW_UP_SENT / BROKER_MESSAGE_SENT; for carried requests set status sent, sent_at, due_at =
     #    sent_at + follow_up_after_days.
 def approve_and_send(draft_id, *, repo, policy, outbox) -> OutboundDraft
-    # human approval: status approved (HUMAN_APPROVED_DRAFT, actor HUMAN) then outbox.send -> sent (BROKER_MESSAGE_SENT)
+    # human approval: status approved (HUMAN_APPROVED_DRAFT, actor HUMAN) then outbox.send -> status sent, sent_at,
+    # delivery_ref, and the same post-send effects as dispatch: DILIGENCE_REQUEST_SENT / BROKER_MESSAGE_SENT event,
+    # carried requests -> status sent, sent_at, due_at = sent_at + follow_up_after_days. Idempotent on a sent draft.
 def match_answers(requests, analysis) -> list[tuple[DiligenceRequest, RequestAnswer]]
     # deterministic: an answer matches a request when normalized topics share a keyword family
     # (roof; hvac/mechanical; phase i/environmental/esa; cam/reconciliation/opex; lease/rollover/estoppel;
@@ -586,6 +593,10 @@ def run_follow_ups(*, repo, policy, outbox, notifier, as_of: datetime | None = N
 ```
 
 ### notifications/format.py additions
+`format_threshold_alert(..., pending_request: OutboundDraft | None = None)`: when a pending information request
+exists, add after "Still unresolved" the line `Awaiting your approval: information request to the broker (3 questions)`
+and use actions review / approve / ignore (labels "Review", "Approve broker questions", "Ignore"). Without it the
+existing golden text and actions are unchanged.
 `format_fell_below_alert(opp, previous_run, new_run, analysis: DocumentAnalysis | None, credit_draft: OutboundDraft | None) -> Notification`
 kind `fell_below_threshold`, title `DEAL #N FELL BACK BELOW THRESHOLD`, body: what the document established (top
 findings by severity, e.g. "Roof: original 2001 built-up membrane, ponding, replacement $85k-$95k"), the capex added,
@@ -672,13 +683,15 @@ auto-send on/off), match_answers families, run_follow_ups cadence + stall + idem
     the updated working values (capex). R5 idempotency.
   - `request_diligence`: only when status is REVIEW and once per message; `build_requests` from items (the agent
     passes the skeptic's missing-evidence concerns: topic, question_for_broker); `compose_information_request` with
-    `in_reply_to=session.message.message_id` and the original subject; `dispatch`. Return request ids, whether it was
-    sent or is awaiting approval, and the outbox ref.
+    `in_reply_to=session.message.message_id` and the original subject; `dispatch`. Under the default policy the
+    draft is stored pending (requires_approval True) and requests stay "draft"; keep `session.pending_request`.
+    Return request ids, `awaiting_approval: bool`, draft id, and the outbox ref when sent.
   - `request_price_adjustment`: only when `session.threshold_lost` or the new status is NEAR/WATCH with a frontier,
     once per message. Code computes `suggested = ceil((current_price - max_viable_price) / 1000) * 1000`; if the
     model's amount differs from `suggested` by more than 25%, use `suggested` and say so in the returned dict.
     `compose_credit_request` + `dispatch` (always pending). Return draft id and amount used.
-  - `notify_human`: reasons `threshold_crossed` (format_threshold_alert) and `fell_below_threshold`
+  - `notify_human`: reasons `threshold_crossed` (format_threshold_alert with `pending_request=session.pending_request`
+    so the alert carries the approve action) and `fell_below_threshold`
     (format_fell_below_alert with the latest analysis and credit draft); R3 intent-before-delivery with dedupe_key.
 - `agents/acquisition.py` system prompt: the procedure becomes: record_claims -> for each attached PDF/image:
   analyze_document -> underwrite -> if threshold_crossed: request_skeptic_review -> request_diligence(items = skeptic

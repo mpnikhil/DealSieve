@@ -51,10 +51,15 @@ classification:
   near_threshold_pct: 0.05        # NEAR if asking price is within 5% of max viable price
 
 outreach:
-  # The autonomy boundary for broker correspondence. Information requests (documents, disclosures, clarifying
-  # questions) and their follow-ups may be sent without a human in the loop. Anything that discusses price,
-  # credits, offers or terms is drafted and waits for explicit human approval. Enforced in code, not in prompts.
-  auto_send_information_requests: true
+  # The autonomy boundary for broker correspondence, enforced in code, not in prompts.
+  # - The FIRST message in a diligence thread (the information request) is drafted by DealSieve and waits for a
+  #   one-tap human approval (Telegram button or dashboard). Set auto_send_information_requests: true to let it go
+  #   out on its own.
+  # - Follow-ups on a thread the human already approved go out automatically on the cadence below, because they
+  #   repeat approved questions and add nothing new. Set auto_follow_up_approved_threads: false to approve each one.
+  # - Anything that discusses price, credits, offers or terms is always drafted and waits for explicit approval.
+  auto_send_information_requests: false
+  auto_follow_up_approved_threads: true
   follow_up_after_days: 3
   max_follow_ups: 2
   always_require_approval:

@@ -20,9 +20,9 @@ from dealsieve.policy import InvestmentPolicy
 from dealsieve.schemas import GateResult, OpportunityStatus, UnderwritingResult, WorkingValues
 from dealsieve.underwriting.classify import classify
 from dealsieve.underwriting.compare import broker_vs_dealsieve
-from dealsieve.underwriting.financing import compute_financing
+from dealsieve.underwriting.financing import _compute_financing
 from dealsieve.underwriting.gates import evaluate_gates
-from dealsieve.underwriting.normalize import normalize_economics
+from dealsieve.underwriting.normalize import _normalize_economics
 from dealsieve.underwriting.stress import run_stress
 from dealsieve.underwriting.viability import solve_max_viable_price
 
@@ -39,6 +39,7 @@ def _failure_summary(
     status: OpportunityStatus,
     gates: list[GateResult],
     price: Decimal,
+    immediate_capex: Decimal,
 ) -> str:
     failed = {gate.gate: gate for gate in gates if not gate.passed}
     if status == OpportunityStatus.DEAD:
@@ -59,8 +60,9 @@ def _failure_summary(
     parts = []
     cap = failed.get("min_normalized_cap_rate")
     if cap is not None:
+        cap_label = "cap" if immediate_capex > 0 else "normalized cap"
         parts.append(
-            f"normalized cap {_percent(Decimal(cap.actual))} < "
+            f"{cap_label} {_percent(Decimal(cap.actual))} < "
             f"{_percent(Decimal(cap.threshold))}"
         )
     dscr = failed.get("min_base_dscr")
@@ -74,7 +76,13 @@ def _failure_summary(
     absolute = failed.get("absolute_max_price")
     if absolute is not None:
         parts.append(f"price {_money(Decimal(absolute.actual))} > {_money(Decimal(absolute.threshold))}")
+    if immediate_capex > 0:
+        return f"Fails on valuation after {_money(immediate_capex)} immediate capex: " + ", ".join(parts)
     return "Fails on valuation: " + ", ".join(parts)
+
+
+class InvalidInputs(ValueError):
+    """Raised when authoritative underwriting inputs cannot produce a valid run."""
 
 
 def run_underwriting(
@@ -89,9 +97,27 @@ def run_underwriting(
     Must be a pure function of (values, policy). Same inputs, same output, every time.
     """
     price = values.asking_price
-    normalized = normalize_economics(values, policy, price)
-    financing = compute_financing(normalized.noi, price, policy)
-    gates = evaluate_gates(values, normalized, financing, policy)
+    if price <= 0:
+        raise InvalidInputs("asking price must be greater than zero")
+
+    normalized, raw_noi = _normalize_economics(values, policy, price)
+    financing, raw_ltv, raw_dscr = _compute_financing(
+        raw_noi,
+        price,
+        policy,
+        values.immediate_capex,
+    )
+    raw_cap = raw_noi / (price + values.immediate_capex)
+    gates = evaluate_gates(
+        values,
+        normalized,
+        financing,
+        policy,
+        raw_price=price,
+        raw_ltv=raw_ltv,
+        raw_normalized_cap_rate=raw_cap,
+        raw_dscr=raw_dscr,
+    )
     viability = solve_max_viable_price(values, policy)
     status = classify(gates, viability, price, policy)
     return UnderwritingResult(
@@ -106,5 +132,5 @@ def run_underwriting(
         status=status,
         viability=viability,
         comparison=broker_vs_dealsieve(values, normalized, financing),
-        failure_summary=_failure_summary(status, gates, price),
+        failure_summary=_failure_summary(status, gates, price, values.immediate_capex),
     )

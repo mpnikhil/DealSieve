@@ -9,6 +9,7 @@ export const mockStats: DashboardStats = {
   conditions_changed_7d: 3,
   threshold_crossings_7d: 1,
   human_interruptions_7d: 1,
+  open_diligence_requests: 2,
   policy_version: "v1-f67cd5690a5b"
 };
 

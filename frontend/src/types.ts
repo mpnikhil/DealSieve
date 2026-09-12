@@ -11,6 +11,7 @@ export interface DashboardStats {
   conditions_changed_7d: number;
   threshold_crossings_7d: number;
   human_interruptions_7d: number;
+  open_diligence_requests: number;
   policy_version: string;
 }
 
@@ -100,6 +101,8 @@ export interface FinancingResult {
   cash_flow_after_debt: number;
   cash_on_cash: number;
   year1_principal_paydown: number;
+  immediate_capex?: number | null;
+  all_in_basis?: number | null;
 }
 
 export interface StressResult {
@@ -239,14 +242,21 @@ export interface SkepticReport {
   created_at: string;
 }
 
+export type OutboundKind = 'information_request' | 'follow_up' | 'credit_request' | 'offer' | 'other';
+
 export interface OutboundDraft {
   draft_id: string;
   opportunity_id: string;
+  kind: OutboundKind;
   to_email: string | null;
   subject: string;
   body: string;
   questions: string[];
+  request_ids: string[];
+  requires_approval: boolean;
   status: 'pending' | 'approved' | 'rejected' | 'sent';
+  in_reply_to_message_id: string | null;
+  delivery_ref: string | null;
   created_at: string;
   decided_at: string | null;
   sent_at: string | null;
@@ -260,7 +270,7 @@ export interface NotificationAction {
 export interface Notification {
   notification_id: string;
   opportunity_id: string;
-  kind: 'threshold_crossed' | 'structural_dead' | 'status_update' | 'draft_pending';
+  kind: 'threshold_crossed' | 'fell_below_threshold' | 'diligence_stalled' | 'structural_dead' | 'status_update' | 'draft_pending';
   channel: string;
   title: string;
   body: string;
@@ -268,6 +278,85 @@ export interface Notification {
   created_at: string;
   delivered: boolean;
   delivery_ref: string | null;
+}
+
+export interface DiligenceRequest {
+  request_id: string;
+  opportunity_id: string;
+  topic: string;
+  question: string;
+  category: 'document' | 'disclosure' | 'clarification';
+  source_concern: string | null;
+  status: 'draft' | 'sent' | 'answered' | 'overdue' | 'stalled' | 'withdrawn';
+  created_at: string;
+  sent_at: string | null;
+  due_at: string | null;
+  last_follow_up_at: string | null;
+  follow_up_count: number;
+  answered_at: string | null;
+  answer_summary: string | null;
+  answer_evidence_ids: string[];
+  answered_by_document: string | null;
+}
+
+export interface CapexItem {
+  item: string;
+  low_estimate: number;
+  high_estimate: number;
+  urgency: 'immediate' | 'near_term' | 'deferred' | 'routine';
+}
+
+export interface DocumentFinding {
+  topic: string;
+  value: string;
+  detail: string | null;
+  severity: 'info' | 'low' | 'medium' | 'high';
+  confidence: number;
+  page: number | null;
+  image_ref: string | null;
+}
+
+export interface RequestAnswer {
+  request_topic: string;
+  answer: string;
+  resolves: boolean;
+}
+
+export interface DocumentAnalysis {
+  analysis_id: string;
+  opportunity_id: string;
+  message_id: string;
+  filename: string;
+  document_type: 'inspection_report' | 'roof_report' | 'phase_i' | 'cam_statement' | 'rent_roll' | 'lease' | 'offering_memorandum' | 'other';
+  summary: string;
+  findings: DocumentFinding[];
+  answers: RequestAnswer[];
+  capex_items: CapexItem[];
+  red_flags: string[];
+  images_reviewed: number;
+  image_paths: string[];
+  text_chars: number;
+  model_backend: string | null;
+  created_at: string;
+}
+
+export interface Attachment {
+  filename: string;
+  content_type: string;
+  size_bytes: number;
+}
+
+export interface InboundMessage {
+  message_id: string;
+  opportunity_id: string | null;
+  from_address: string;
+  to_address: string;
+  subject: string;
+  body: string;
+  date: string;
+  attachments: Attachment[];
+  status: 'received' | 'processed' | 'failed' | 'ignored';
+  created_at: string;
 }
 
 export interface OpportunityDetail {
@@ -280,4 +369,7 @@ export interface OpportunityDetail {
   skeptic_reports: SkepticReport[];
   drafts: OutboundDraft[];
   notifications: Notification[];
+  diligence_requests: DiligenceRequest[];
+  document_analyses: DocumentAnalysis[];
+  inbound_messages: InboundMessage[];
 }

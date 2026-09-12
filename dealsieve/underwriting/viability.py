@@ -12,9 +12,9 @@ from dealsieve.schemas import (
     ViabilityPath,
     WorkingValues,
 )
-from dealsieve.underwriting.financing import compute_financing
+from dealsieve.underwriting.financing import _compute_financing
 from dealsieve.underwriting.gates import evaluate_gates
-from dealsieve.underwriting.normalize import normalize_economics
+from dealsieve.underwriting.normalize import _normalize_economics
 
 MONEY = Decimal("0.01")
 RATE = Decimal("0.000001")
@@ -25,9 +25,24 @@ def _gates_at(
     policy: InvestmentPolicy,
     price: Decimal,
 ) -> list[GateResult]:
-    normalized = normalize_economics(values, policy, price)
-    financing = compute_financing(normalized.noi, price, policy)
-    return evaluate_gates(values, normalized, financing, policy)
+    normalized, raw_noi = _normalize_economics(values, policy, price)
+    financing, raw_ltv, raw_dscr = _compute_financing(
+        raw_noi,
+        price,
+        policy,
+        values.immediate_capex,
+    )
+    raw_cap = raw_noi / (price + values.immediate_capex)
+    return evaluate_gates(
+        values,
+        normalized,
+        financing,
+        policy,
+        raw_price=price,
+        raw_ltv=raw_ltv,
+        raw_normalized_cap_rate=raw_cap,
+        raw_dscr=raw_dscr,
+    )
 
 
 def _economic_passes(values: WorkingValues, policy: InvestmentPolicy, price: Decimal) -> bool:

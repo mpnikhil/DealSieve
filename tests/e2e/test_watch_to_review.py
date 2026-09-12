@@ -102,11 +102,12 @@ def test_watch_then_price_drop_flips_to_review_and_interrupts_once(fixtures_dir,
     assert len(reports) == 1 and reports[0].concerns, "skeptic ran once, on REVIEW entry"
     drafts = repo.list_drafts(opportunity_id=a.opportunity_id)
     info = [d for d in drafts if d.kind == "information_request"]
-    assert len(info) == 1, "one information request to the broker, sent autonomously under the outreach policy"
-    assert info[0].status == "sent" and info[0].requires_approval is False
-    assert all(d.requires_approval for d in drafts if d.kind in ("credit_request", "offer")), "money talk waits for a human"
+    assert len(info) == 1, "one information request to the broker, drafted for one-tap human approval"
+    assert info[0].status == "pending" and info[0].requires_approval is True
+    assert not [d for d in drafts if d.status == "sent"], "nothing left the building without a human"
+    assert any(act.action == "approve" for act in alert.actions), "the alert offers one-tap approval"
     requests = repo.list_diligence_requests(a.opportunity_id)
-    assert len(requests) >= 3 and all(r.status == "sent" for r in requests)
+    assert len(requests) >= 3 and all(r.status == "draft" for r in requests)
     topics = " ".join(r.topic.lower() for r in requests)
     assert "roof" in topics and "phase i" in topics and "cam" in topics
 

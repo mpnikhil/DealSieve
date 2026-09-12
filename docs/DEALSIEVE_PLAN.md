@@ -1331,7 +1331,7 @@ finally arrives, then chasing again. DealSieve now owns that loop.
 REVIEW crossing
 -> Skeptic names the unsupported claims
 -> DealSieve turns them into DiligenceRequests
--> information request sent to the broker (autonomously, under policy)
+-> information request drafted; human approves with one tap (or policy lets it go out alone)
 -> follow-ups on the policy cadence (3 days, max 2)
 -> broker replies with documents (inspection report PDF with photos)
 -> Inspector agent reads text AND images (multimodal)
@@ -1349,7 +1349,8 @@ The principle "humans own irreversible decisions" is kept by classifying outboun
 
 | Outbound kind | Examples | Who sends |
 |---|---|---|
-| information_request, follow_up | "Can you share the roof age?", "Any update on the Phase I?" | DealSieve, autonomously, when `outreach.auto_send_information_requests` is true |
+| information_request | "Can you share the roof age?" | Drafted by DealSieve; a human approves with one tap (default). `outreach.auto_send_information_requests: true` lets it go out alone |
+| follow_up | "Any update on the Phase I?" | DealSieve, autonomously, on threads a human already approved (default); `auto_follow_up_approved_threads: false` to approve each |
 | credit_request, offer | "We would need a $42,000 credit", LOIs, price talk | Drafted by DealSieve; a human approves before anything leaves |
 
 A deterministic screen (`dealsieve.diligence.classify_outbound_text`) rejects money and terms language from

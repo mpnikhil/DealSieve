@@ -30,6 +30,16 @@ def normalize_economics(
     price: Decimal,
 ) -> NormalizedEconomics:
     """Return policy-normalized property economics at ``price``."""
+    normalized, _ = _normalize_economics(values, policy, price)
+    return normalized
+
+
+def _normalize_economics(
+    values: WorkingValues,
+    policy: InvestmentPolicy,
+    price: Decimal,
+) -> tuple[NormalizedEconomics, Decimal]:
+    """Return the emitted economics and the unrounded NOI used by finance gates."""
     gross_potential_rent = values.gross_scheduled_income
     vacancy_pct = max(
         policy.normalization.normalized_vacancy_pct,
@@ -106,7 +116,8 @@ def normalize_economics(
         price_per_sqft = _money(price / sqft)
         noi_per_sqft = _money(noi / sqft)
 
-    return NormalizedEconomics(
+    all_in_basis = price + values.immediate_capex
+    normalized = NormalizedEconomics(
         gross_potential_rent=_money(gross_potential_rent),
         other_income=_money(values.other_income),
         vacancy_loss=_money(vacancy_loss),
@@ -124,7 +135,8 @@ def normalize_economics(
         noi=_money(noi),
         broker_noi=_money(values.stated_noi) if values.stated_noi is not None else None,
         broker_cap_rate=broker_cap_rate,
-        normalized_cap_rate=_rate(noi / price),
+        normalized_cap_rate=_rate(noi / all_in_basis),
         price_per_sqft=price_per_sqft,
         noi_per_sqft=noi_per_sqft,
     )
+    return normalized, noi

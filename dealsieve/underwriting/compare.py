@@ -50,7 +50,7 @@ def broker_vs_dealsieve(
     if values.building_sqft:
         broker_price_per_sqft = financing.purchase_price / Decimal(values.building_sqft)
 
-    return [
+    rows = [
         ComparisonRow(metric="NOI", broker=_money(values.stated_noi), dealsieve=_money(normalized.noi) or ""),
         ComparisonRow(
             metric="Cap rate",
@@ -81,10 +81,30 @@ def broker_vs_dealsieve(
             dealsieve=_money(capex.normalized) or "",
             note=capex.basis,
         ),
+    ]
+    if financing.immediate_capex > 0:
+        rows.extend(
+            [
+                ComparisonRow(
+                    metric="Immediate capex",
+                    broker=None,
+                    dealsieve=_money(financing.immediate_capex) or "",
+                ),
+                ComparisonRow(
+                    metric="All-in basis",
+                    broker=_money(financing.purchase_price),
+                    dealsieve=_money(financing.all_in_basis) or "",
+                ),
+            ]
+        )
+    rows.extend(
+        [
         ComparisonRow(metric="DSCR", broker=None, dealsieve=_multiple(financing.dscr) or ""),
         ComparisonRow(
             metric="Price / sf",
             broker=_money(broker_price_per_sqft),
             dealsieve=_money(normalized.price_per_sqft) or "—",
         ),
-    ]
+        ]
+    )
+    return rows

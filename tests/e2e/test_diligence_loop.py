@@ -1,8 +1,8 @@
 """Act 3 of the story: the autonomous diligence loop.
 
-After the price drop makes the deal investable, DealSieve has already sent the broker an information request
-(roof age, Phase I, CAM reconciliation, lease rollover) without a human in the loop, because the outreach policy
-pre-authorises information requests. The broker replies with a property condition report (PDF with photos).
+After the price drop makes the deal investable, DealSieve drafts an information request to the broker (roof age,
+Phase I, CAM reconciliation). Humans stay in the loop: the request waits for a one-tap approval, then goes out.
+Follow-ups on that approved thread are autonomous. The broker replies with a property condition report (PDF with photos).
 DealSieve recognises the thread, reads the document text AND the photos, marks the roof question answered,
 records $85k-$95k of day-one roof work as immediate capex, re-underwrites on the all-in basis, and the deal falls
 back out of REVIEW to NEAR with a new frontier. That is a decision change, so the human is interrupted (second time
@@ -20,7 +20,7 @@ from decimal import Decimal
 
 import pytest
 
-from dealsieve.diligence import run_follow_ups
+from dealsieve.diligence import approve_and_send, run_follow_ups
 from dealsieve.ingestion import parse_eml
 from dealsieve.notifications import RecordingNotifier
 from dealsieve.outbound import RecordingOutbox
@@ -47,9 +47,20 @@ def test_inspection_report_is_read_answers_requests_and_moves_the_frontier(fixtu
     a = _run(fixtures_dir, repo, policy, notifier, outbox, "01_initial_offer")
     b = _run(fixtures_dir, repo, policy, notifier, outbox, "02_price_drop")
     assert b.status_after == OpportunityStatus.REVIEW and len(notifier.sent) == 1
+    assert outbox.sent == [], "the information request waits for a human"
+    pending = [d for d in repo.list_drafts(opportunity_id=a.opportunity_id) if d.kind == "information_request"]
+    assert len(pending) == 1 and pending[0].status == "pending" and pending[0].requires_approval
+
+    # --- the human taps Approve (Telegram button or dashboard) ---------------------------------------
+    approved = approve_and_send(pending[0].draft_id, repo=repo, policy=policy, outbox=outbox)
+    assert approved.status == "sent" and approved.delivery_ref
     assert len(outbox.sent) == 1 and outbox.sent[0].kind == "information_request"
     sent_before = {r.request_id: r for r in repo.list_diligence_requests(a.opportunity_id)}
-    assert sent_before and all(r.status == "sent" for r in sent_before.values())
+    assert sent_before and all(r.status == "sent" and r.sent_at and r.due_at for r in sent_before.values())
+    types_after_approval = [e.type for e in repo.list_events(a.opportunity_id)]
+    assert EventType.HUMAN_APPROVED_DRAFT in types_after_approval
+    assert EventType.DILIGENCE_REQUEST_SENT in types_after_approval
+    assert any(e.actor.value == "human" for e in repo.list_events(a.opportunity_id) if e.type == EventType.HUMAN_APPROVED_DRAFT)
 
     # --- Event C: broker replies with the property condition report --------------------------------
     c = _run(fixtures_dir, repo, policy, notifier, outbox, "05_inspection_report")
@@ -128,16 +139,17 @@ def test_information_requests_cannot_carry_money_talk(fixtures_dir, repo, policy
     assert classify_outbound_text("Please send the LOI template.") == "offer"
 
 
-def test_autosend_off_means_approval_first(fixtures_dir, repo, policy, monkeypatch):
-    """With auto_send_information_requests=false the same loop produces a pending draft and sends nothing."""
+def test_autosend_policy_sends_information_requests_without_approval(fixtures_dir, repo, policy):
+    """Flip one policy flag and the same loop sends the first message itself. Money talk still waits."""
     from dealsieve.policy import load_policy
 
-    strict = load_policy(fixtures_dir / "policies" / "no_autosend_policy.yaml")
+    autosend = load_policy(fixtures_dir / "policies" / "autosend_policy.yaml")
+    assert autosend.outreach.auto_send_information_requests is True
     notifier, outbox = RecordingNotifier(), RecordingOutbox()
-    _run(fixtures_dir, repo, strict, notifier, outbox, "01_initial_offer")
-    b = _run(fixtures_dir, repo, strict, notifier, outbox, "02_price_drop")
+    _run(fixtures_dir, repo, autosend, notifier, outbox, "01_initial_offer")
+    b = _run(fixtures_dir, repo, autosend, notifier, outbox, "02_price_drop")
     assert b.status_after == OpportunityStatus.REVIEW
-    assert outbox.sent == []
+    assert len(outbox.sent) == 1 and outbox.sent[0].kind == "information_request"
     drafts = repo.list_drafts(opportunity_id=b.opportunity_id)
-    assert len(drafts) == 1 and drafts[0].kind == "information_request" and drafts[0].requires_approval and drafts[0].status == "pending"
-    assert all(r.status == "draft" for r in repo.list_diligence_requests(b.opportunity_id))
+    assert len(drafts) == 1 and drafts[0].status == "sent" and drafts[0].requires_approval is False
+    assert all(r.status == "sent" for r in repo.list_diligence_requests(b.opportunity_id))

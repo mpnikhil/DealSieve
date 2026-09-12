@@ -1,0 +1,24 @@
+@@ -35,10 +35,22 @@
+   if (IS_MOCK) {
+     const draft = mockOpportunityDetail.drafts.find(d => d.draft_id === draftId);
+     if (!draft) throw new Error('Draft not found');
+-    return { ...draft, status: 'approved' };
++    return { ...draft, status: 'sent', delivery_ref: 'mock_del_ref_123' };
+   }
+   const res = await fetch(`/api/drafts/${draftId}/approve`, { method: 'POST' });
+   if (!res.ok) throw new Error('Failed to approve draft');
+   return res.json();
+ }
+ 
++export async function fetchCorrespondence(opportunityId: string): Promise<{ inbound: InboundMessage[], outbound: OutboundDraft[] }> {
++  if (IS_MOCK) {
++    return {
++      inbound: mockOpportunityDetail.inbound_messages,
++      outbound: mockOpportunityDetail.drafts
++    };
++  }
++  const res = await fetch(`/api/correspondence/${opportunityId}`);
++  if (!res.ok) throw new Error('Failed to fetch correspondence');
++  return res.json();
++}
++

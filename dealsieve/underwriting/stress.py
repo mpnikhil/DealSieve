@@ -6,8 +6,8 @@ from decimal import Decimal
 
 from dealsieve.policy import InvestmentPolicy
 from dealsieve.schemas import StressResult, WorkingValues
-from dealsieve.underwriting.financing import compute_financing
-from dealsieve.underwriting.normalize import normalize_economics
+from dealsieve.underwriting.financing import _compute_financing
+from dealsieve.underwriting.normalize import _normalize_economics
 
 
 def run_stress(
@@ -38,15 +38,20 @@ def run_stress(
     ]
     results: list[StressResult] = []
     for name, stressed_values in scenarios:
-        normalized = normalize_economics(stressed_values, policy, price)
-        financing = compute_financing(normalized.noi, price, policy)
+        normalized, raw_noi = _normalize_economics(stressed_values, policy, price)
+        financing, _, raw_dscr = _compute_financing(
+            raw_noi,
+            price,
+            policy,
+            values.immediate_capex,
+        )
         results.append(
             StressResult(
                 scenario=name,
                 noi=normalized.noi,
                 dscr=financing.dscr,
                 cash_flow_after_debt=financing.cash_flow_after_debt,
-                covers_debt=financing.dscr >= policy.stress.min_stress_dscr,
+                covers_debt=raw_dscr >= policy.stress.min_stress_dscr,
             )
         )
     return results
