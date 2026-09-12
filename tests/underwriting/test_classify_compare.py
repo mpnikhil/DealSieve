@@ -95,3 +95,33 @@ def test_comparison_rows_and_formatting(demo_values, policy):
     assert by_metric["DSCR"].broker is None
     assert by_metric["DSCR"].dealsieve == "1.02x"
     assert by_metric["Price / sf"].dealsieve == "$78"
+
+
+def test_comparison_adds_capex_and_all_in_basis_rows(demo_values, policy):
+    values = demo_values.model_copy(update={"immediate_capex": Decimal("90000")})
+    normalized = normalize_economics(values, policy, values.asking_price)
+    financing = compute_financing(
+        normalized.noi,
+        values.asking_price,
+        policy,
+        values.immediate_capex,
+    )
+
+    rows = broker_vs_dealsieve(values, normalized, financing)
+    assert [row.metric for row in rows] == [
+        "NOI",
+        "Cap rate",
+        "Vacancy",
+        "Management",
+        "Property tax",
+        "CapEx reserve",
+        "Immediate capex",
+        "All-in basis",
+        "DSCR",
+        "Price / sf",
+    ]
+    by_metric = {row.metric: row for row in rows}
+    assert by_metric["Immediate capex"].broker is None
+    assert by_metric["Immediate capex"].dealsieve == "$90,000"
+    assert by_metric["All-in basis"].broker == "$1,550,000"
+    assert by_metric["All-in basis"].dealsieve == "$1,640,000"

@@ -4,7 +4,8 @@ from decimal import Decimal
 
 import pytest
 
-from dealsieve.schemas import WorkingValues
+from dealsieve.schemas import ExpenseClaims, OpportunityStatus, WorkingValues
+from dealsieve.underwriting import run_underwriting
 from dealsieve.underwriting.financing import compute_financing
 from dealsieve.underwriting.gates import evaluate_gates
 from dealsieve.underwriting.normalize import normalize_economics
@@ -27,6 +28,34 @@ def _gates(values: WorkingValues, policy):
 
 def _gate(values: WorkingValues, policy, key: str):
     return next(gate for gate in _gates(values, policy) if gate.gate == key)
+
+
+def _frictionless_policy(policy):
+    normalization = policy.normalization.model_copy(
+        update={
+            "management_fee_pct": Decimal("0"),
+            "normalized_vacancy_pct": Decimal("0"),
+            "require_property_tax_reset": False,
+            "require_capex_reserve": False,
+            "min_insurance_per_sqft": Decimal("0"),
+            "min_repairs_pct_of_egi": Decimal("0"),
+        }
+    )
+    return policy.model_copy(update={"normalization": normalization})
+
+
+def _values_with_no_expenses(demo_values, *, price: Decimal, noi: Decimal):
+    return demo_values.model_copy(
+        update={
+            "asking_price": price,
+            "gross_scheduled_income": noi,
+            "other_income": Decimal("0"),
+            "stated_vacancy_pct": Decimal("0"),
+            "stated_expenses": ExpenseClaims(),
+            "stated_noi": noi,
+            "building_sqft": None,
+        }
+    )
 
 
 def test_gate_order_is_stable(demo_values, policy):
@@ -130,4 +159,123 @@ def test_dscr_boundary(demo_values, policy, actual, passed):
         for item in evaluate_gates(demo_values, normalized, financing, policy)
         if item.gate == "min_base_dscr"
     )
+    assert gate.passed is passed
+
+
+@pytest.mark.parametrize(
+    ("raw_cap", "passed"),
+    [(Decimal("0.08"), True), (Decimal("0.0799996"), False)],
+)
+def test_engine_evaluates_cap_gate_before_display_rounding(
+    demo_values,
+    policy,
+    raw_cap,
+    passed,
+):
+    policy = _frictionless_policy(policy)
+    price = Decimal("1000000")
+    values = _values_with_no_expenses(demo_values, price=price, noi=price * raw_cap)
+
+    result = run_underwriting(values, policy, opportunity_id="raw-cap")
+    gate = next(item for item in result.gates if item.gate == "min_normalized_cap_rate")
+
+    assert result.normalized.normalized_cap_rate == Decimal("0.080000")
+    assert gate.passed is passed
+    if passed:
+        assert result.status == OpportunityStatus.REVIEW
+    else:
+        assert result.status != OpportunityStatus.REVIEW
+        assert result.viability.max_viable_price < price
+
+
+@pytest.mark.parametrize(
+    ("raw_dscr", "passed"),
+    [(Decimal("1.35"), True), (Decimal("1.3499996"), False)],
+)
+def test_engine_evaluates_dscr_gate_before_display_rounding(
+    demo_values,
+    policy,
+    raw_dscr,
+    passed,
+):
+    policy = _frictionless_policy(policy)
+    financing = policy.financing.model_copy(
+        update={
+            "assumed_interest_rate": Decimal("0"),
+            "amortization_years": 25,
+            "max_ltv": Decimal("1"),
+            "closing_cost_pct": Decimal("0"),
+        }
+    )
+    capital = policy.capital.model_copy(
+        update={"acquisition_equity": Decimal("0"), "reserve_target": Decimal("0")}
+    )
+    underwriting = policy.underwriting.model_copy(
+        update={"min_normalized_cap_rate": Decimal("0")}
+    )
+    policy = policy.model_copy(
+        update={"financing": financing, "capital": capital, "underwriting": underwriting}
+    )
+    values = _values_with_no_expenses(
+        demo_values,
+        price=Decimal("1000000"),
+        noi=Decimal("40000") * raw_dscr,
+    )
+
+    result = run_underwriting(values, policy, opportunity_id="raw-dscr")
+    gate = next(item for item in result.gates if item.gate == "min_base_dscr")
+
+    assert result.financing.dscr == Decimal("1.350000")
+    assert gate.passed is passed
+
+
+@pytest.mark.parametrize(
+    ("price", "passed"),
+    [(Decimal("2000000"), True), (Decimal("2000000.004"), False)],
+)
+def test_engine_evaluates_price_gate_before_display_rounding(
+    demo_values,
+    policy,
+    price,
+    passed,
+):
+    values = demo_values.model_copy(update={"asking_price": price})
+    result = run_underwriting(values, policy, opportunity_id="raw-price")
+    gate = next(item for item in result.gates if item.gate == "absolute_max_price")
+
+    assert result.financing.purchase_price == Decimal("2000000.00")
+    assert gate.passed is passed
+
+
+@pytest.mark.parametrize(
+    ("equity", "passed"),
+    [(Decimal("250000"), True), (Decimal("249999.6"), False)],
+)
+def test_engine_evaluates_ltv_gate_before_display_rounding(
+    demo_values,
+    policy,
+    equity,
+    passed,
+):
+    policy = _frictionless_policy(policy)
+    financing = policy.financing.model_copy(update={"closing_cost_pct": Decimal("0")})
+    capital = policy.capital.model_copy(
+        update={"acquisition_equity": equity, "reserve_target": Decimal("0")}
+    )
+    underwriting = policy.underwriting.model_copy(
+        update={"min_normalized_cap_rate": Decimal("0"), "min_base_dscr": Decimal("0")}
+    )
+    policy = policy.model_copy(
+        update={"financing": financing, "capital": capital, "underwriting": underwriting}
+    )
+    values = _values_with_no_expenses(
+        demo_values,
+        price=Decimal("1000000"),
+        noi=Decimal("500000"),
+    )
+
+    result = run_underwriting(values, policy, opportunity_id="raw-ltv")
+    gate = next(item for item in result.gates if item.gate == "max_ltv")
+
+    assert result.financing.ltv == Decimal("0.750000")
     assert gate.passed is passed

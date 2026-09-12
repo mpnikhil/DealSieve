@@ -8,8 +8,14 @@ from pathlib import Path
 
 import pytest
 
-from dealsieve.schemas import ExpenseClaims, ExtractedClaims, OpportunityStatus, WorkingValues
-from dealsieve.underwriting import run_underwriting
+from dealsieve.schemas import (
+    CapexItem,
+    ExpenseClaims,
+    ExtractedClaims,
+    OpportunityStatus,
+    WorkingValues,
+)
+from dealsieve.underwriting import InvalidInputs, run_underwriting
 
 NAMES = [
     "01_initial_offer",
@@ -104,6 +110,67 @@ def test_fixture_01_and_price_drop_hit_demo_targets(fixtures_dir, policy):
     assert dropped.normalized.normalized_cap_rate >= Decimal("0.082")
     assert dropped.financing.dscr >= Decimal("1.40")
     assert dropped.status == OpportunityStatus.REVIEW
+
+
+def test_fixture_01_act_3_capex_is_near(fixtures_dir, policy):
+    values = _reconcile_by_hand(fixtures_dir, "01_initial_offer").model_copy(
+        update={
+            "asking_price": Decimal("1250000"),
+            "immediate_capex": Decimal("90000"),
+            "capex_items": [
+                CapexItem(
+                    item="roof",
+                    low=Decimal("85000"),
+                    high=Decimal("95000"),
+                    urgency="immediate",
+                    source_document="roof_report.pdf",
+                )
+            ],
+        }
+    )
+
+    result = run_underwriting(values, policy, opportunity_id="fixture-01-act-3")
+
+    assert result.status == OpportunityStatus.NEAR
+    assert Decimal("0.076") <= result.normalized.normalized_cap_rate <= Decimal("0.078")
+    assert Decimal("1.28") <= result.financing.dscr <= Decimal("1.32")
+    assert Decimal("0.75") <= result.financing.ltv <= Decimal("0.76")
+    assert result.viability.max_viable_price is not None
+    assert Decimal("1190000") <= result.viability.max_viable_price <= Decimal("1225000")
+    assert "min_normalized_cap_rate" in result.viability.binding_constraints
+    assert result.failure_summary == (
+        "Fails on valuation after $90,000 immediate capex: "
+        "cap 7.71% < 8.00%, DSCR 1.30x < 1.35x, LTV 75.2% > 75.0%"
+    )
+
+
+@pytest.mark.parametrize("price", [Decimal("0"), Decimal("-1")])
+def test_engine_rejects_nonpositive_price(demo_values, policy, price):
+    values = demo_values.model_copy(update={"asking_price": price})
+
+    with pytest.raises(InvalidInputs, match="asking price must be greater than zero"):
+        run_underwriting(values, policy, opportunity_id="invalid-price")
+
+
+def test_negative_noi_fails_cap_and_dscr_even_without_a_loan(demo_values, policy):
+    values = demo_values.model_copy(
+        update={
+            "asking_price": Decimal("100000"),
+            "gross_scheduled_income": Decimal("0"),
+            "stated_expenses": ExpenseClaims(utilities=Decimal("10000")),
+            "building_sqft": None,
+        }
+    )
+
+    result = run_underwriting(values, policy, opportunity_id="negative-noi")
+    gates = {gate.gate: gate for gate in result.gates}
+
+    assert result.normalized.noi < 0
+    assert result.financing.loan_amount == 0
+    assert result.financing.dscr == 0
+    assert not gates["min_normalized_cap_rate"].passed
+    assert not gates["min_base_dscr"].passed
+    assert result.status != OpportunityStatus.REVIEW
 
 
 def test_fixture_03_is_unfixably_structural(fixtures_dir, policy):

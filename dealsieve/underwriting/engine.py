@@ -70,8 +70,14 @@ def _failure_summary(
         parts.append(f"DSCR {Decimal(dscr.actual):.2f}x < {Decimal(dscr.threshold):.2f}x")
     ltv = failed.get("max_ltv")
     if ltv is not None:
+        if immediate_capex > 0:
+            ltv_actual = f"{Decimal(ltv.actual) * 100:.1f}%"
+            ltv_threshold = f"{Decimal(ltv.threshold) * 100:.1f}%"
+        else:
+            ltv_actual = _percent(Decimal(ltv.actual))
+            ltv_threshold = _percent(Decimal(ltv.threshold))
         parts.append(
-            f"LTV {_percent(Decimal(ltv.actual))} > {_percent(Decimal(ltv.threshold))}"
+            f"LTV {ltv_actual} > {ltv_threshold}"
         )
     absolute = failed.get("absolute_max_price")
     if absolute is not None:

@@ -42,7 +42,11 @@ def broker_vs_dealsieve(
     financing: FinancingResult,
 ) -> list[ComparisonRow]:
     """Return the eight documented, presentation-ready comparison rows."""
-    vacancy_rate = normalized.vacancy_loss / normalized.gross_potential_rent
+    vacancy_rate = (
+        normalized.vacancy_loss / normalized.gross_potential_rent
+        if normalized.gross_potential_rent != 0
+        else Decimal("0")
+    )
     management = _expense(normalized, "Management")
     property_tax = _expense(normalized, "Property tax")
     capex = _expense(normalized, "CapEx reserve")
@@ -99,12 +103,12 @@ def broker_vs_dealsieve(
         )
     rows.extend(
         [
-        ComparisonRow(metric="DSCR", broker=None, dealsieve=_multiple(financing.dscr) or ""),
-        ComparisonRow(
-            metric="Price / sf",
-            broker=_money(broker_price_per_sqft),
-            dealsieve=_money(normalized.price_per_sqft) or "—",
-        ),
+            ComparisonRow(metric="DSCR", broker=None, dealsieve=_multiple(financing.dscr) or ""),
+            ComparisonRow(
+                metric="Price / sf",
+                broker=_money(broker_price_per_sqft),
+                dealsieve=_money(normalized.price_per_sqft) or "—",
+            ),
         ]
     )
     return rows
