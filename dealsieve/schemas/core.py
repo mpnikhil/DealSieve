@@ -28,6 +28,9 @@ Money = Annotated[Decimal, PlainSerializer(lambda v: float(v), return_type=float
 Rate = Annotated[Decimal, PlainSerializer(lambda v: float(v), return_type=float, when_used="json")]
 """Fractional rate: 0.08 means 8%. Decimal in Python, number in JSON."""
 
+Num = Annotated[Decimal, PlainSerializer(lambda v: float(v), return_type=float, when_used="json")]
+"""Any other decimal quantity (thresholds, counts as Decimal). Decimal in Python, number in JSON."""
+
 
 def now_utc() -> datetime:
     return datetime.now(UTC)
@@ -278,16 +281,16 @@ class GateResult(DSModel):
     kind: ConstraintKind
     description: str
     comparator: Literal[">=", "<=", "==", "between"]
-    threshold: Decimal | int | None
-    actual: Decimal | int | None
+    threshold: Num | int | None
+    actual: Num | int | None
     passed: bool
     price_dependent: bool = Field(description="True if changing purchase price can flip this gate.")
 
 
 class ViabilityPath(DSModel):
     variable: str
-    current_value: Decimal
-    required_value: Decimal
+    current_value: Num
+    required_value: Num
     description: str
 
 
@@ -540,6 +543,7 @@ __all__ = [
     "InboundMessage",
     "ModelPurpose",
     "Money",
+    "Num",
     "NormalizedEconomics",
     "Notification",
     "NotificationAction",

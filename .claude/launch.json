@@ -4,14 +4,52 @@
     {
       "name": "dashboard-mock",
       "runtimeExecutable": "env",
-      "runtimeArgs": ["VITE_MOCK=1", "npm", "--prefix", "frontend", "run", "dev", "--", "--port", "5173", "--strictPort"],
+      "runtimeArgs": [
+        "VITE_MOCK=1",
+        "npm",
+        "--prefix",
+        "frontend",
+        "run",
+        "dev",
+        "--",
+        "--port",
+        "5173",
+        "--strictPort"
+      ],
       "port": 5173
+    },
+    {
+      "name": "api-live",
+      "runtimeExecutable": "env",
+      "runtimeArgs": [
+        "DEALSIEVE_DB_PATH=/private/tmp/claude-501/-Users-nikhilpujari-DealSieve/f773d4e9-742b-41e3-afd6-ab35040d621b/scratchpad/live_demo.db",
+        "DEALSIEVE_MODEL_BACKEND=cli",
+        ".venv/bin/python",
+        "-m",
+        "uvicorn",
+        "dealsieve.api.app:app",
+        "--port",
+        "8010",
+        "--reload",
+        "--reload-dir",
+        "dealsieve"
+      ],
+      "port": 8010
     },
     {
       "name": "api",
       "runtimeExecutable": ".venv/bin/python",
-      "runtimeArgs": ["-m", "uvicorn", "dealsieve.api.app:app", "--port", "8000"],
-      "port": 8000
+      "runtimeArgs": [
+        "-m",
+        "uvicorn",
+        "dealsieve.api.app:app",
+        "--port",
+        "8010",
+        "--reload",
+        "--reload-dir",
+        "dealsieve"
+      ],
+      "port": 8010
     }
   ]
 }
