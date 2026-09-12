@@ -1,0 +1,70 @@
+%% DealSieve architecture. Three boundaries, color-coded:
+%%   purple = LLM territory (Strands agents, swappable model provider)
+%%   blue   = deterministic code (Python, tested, enforces every gate)
+%%   orange = human
+%% Storage (SQLite) and interfaces (dashboard/Telegram) sit between them.
+
+flowchart TD
+    subgraph CH["Channels"]
+        EM["Email\n(.eml / SES)"]
+        TG["Telegram"]
+        URLIN["URL paste"]
+    end
+
+    IM["InboundMessage\nchannel-agnostic"]
+    EM --> IM
+    TG --> IM
+    URLIN --> IM
+
+    subgraph LLM["LLM territory — Strands Agents SDK"]
+        MP["Model provider\nCLIModel · BedrockModel · AnthropicModel · ScriptedModel\n(swapped by env var, zero code change)"]
+        AA["Acquisition Agent\nextracts claims with provenance,\nfollows a fixed tool-call procedure"]
+        SK["Skeptic Agent\nindependent second opinion,\nstructured_output_model=SkepticOutput"]
+        AA -.uses.- MP
+        SK -.uses.- MP
+    end
+
+    IM --> AA
+
+    subgraph DET["Deterministic code — Python, tested, enforces every gate"]
+        RC["record_claims\nidentity resolve + evidence store + reconcile"]
+        UW["underwrite\ndeterministic finance engine\n+ immutable policy + viability solver"]
+        RSR["request_skeptic_review\n(only when status = REVIEW)"]
+        DBQ["draft_broker_questions\n(only after a skeptic report)"]
+        NH["notify_human\n(only on a threshold crossing, once)"]
+    end
+
+    AA -->|"tool call"| RC --> UW --> RSR
+    RSR -->|invokes| SK
+    SK -->|verdict + concerns| DBQ --> NH
+
+    DB[("SQLite\nimmutable events · immutable underwriting runs\nderived opportunity state")]
+    RC --> DB
+    UW --> DB
+    RSR --> DB
+    DBQ --> DB
+    NH --> DB
+
+    subgraph OUT["Interfaces"]
+        DASH["Dashboard\nFastAPI + React"]
+        ALERT["Telegram alert\n(or console notifier)"]
+    end
+    DB --> DASH
+    NH --> ALERT
+
+    subgraph HUM["Human"]
+        H["Investor\nreviews the alert,\napproves or rejects the draft"]
+    end
+    DASH --> H
+    ALERT --> H
+    H -.approve / reject.-> DBQ
+
+    classDef llm fill:#efe4ff,stroke:#7c4dff,color:#3d1a8f;
+    classDef det fill:#e0f2ff,stroke:#2f7ed8,color:#0d3a66;
+    classDef human fill:#fff1d6,stroke:#e08a00,color:#6b4400;
+    classDef store fill:#eeeeee,stroke:#666666,color:#222222;
+
+    class MP,AA,SK llm;
+    class RC,UW,RSR,DBQ,NH det;
+    class H human;
+    class DB store;

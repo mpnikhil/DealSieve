@@ -72,7 +72,37 @@ export function DealDetail() {
               )}
             </div>
             <h1 className="text-2xl font-bold text-slate-900 mb-1">{opportunity.display_name}</h1>
-            <div className="text-sm text-slate-500">{property.canonical_address}</div>
+            <div className="text-sm text-slate-500">
+              {(() => {
+                const nameMatches = opportunity.display_name.toLowerCase().includes(property.canonical_address.toLowerCase()) || property.canonical_address.toLowerCase().includes(opportunity.display_name.toLowerCase());
+                let sublineStr = property.canonical_address;
+                if (nameMatches) {
+                  const parts = [];
+                  const loc = [
+                    property.city && property.state ? `${property.city}, ${property.state}` : (property.city || property.state || ''),
+                    property.postal_code || ''
+                  ].filter(Boolean).join(' ').trim();
+                  if (loc) parts.push(loc);
+                  if (property.property_type) parts.push(property.property_type);
+                  if (property.building_sqft) parts.push(`${new Intl.NumberFormat('en-US').format(property.building_sqft)} sf`);
+                  sublineStr = parts.join(' · ');
+                }
+                let brokerStr = '';
+                if (opportunity.broker_name && opportunity.broker_email) {
+                  brokerStr = `Broker: ${opportunity.broker_name} <${opportunity.broker_email}>`;
+                } else if (opportunity.broker_name) {
+                  brokerStr = `Broker: ${opportunity.broker_name}`;
+                } else if (opportunity.broker_email) {
+                  brokerStr = `Broker: ${opportunity.broker_email}`;
+                }
+                return (
+                  <div className="flex flex-col gap-0.5">
+                    <span>{sublineStr}</span>
+                    {brokerStr && <span className="text-slate-400">{brokerStr}</span>}
+                  </div>
+                );
+              })()}
+            </div>
             {opportunity.reason_summary && (
               <div className="mt-4 text-sm text-slate-700 p-3 bg-slate-50 border border-slate-100 rounded">
                 {opportunity.reason_summary}
@@ -209,10 +239,13 @@ export function DealDetail() {
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-slate-100 bg-white">
-                  {evidence.map(ev => (
+                  {[...evidence].sort((a, b) => {
+                    if (a.field !== b.field) return a.field.localeCompare(b.field);
+                    return a.source_document.localeCompare(b.source_document);
+                  }).map(ev => (
                     <tr key={ev.evidence_id}>
                       <td className="px-5 py-3 font-medium text-slate-700">{ev.field}</td>
-                      <td className="px-5 py-3 text-slate-900">{String(ev.value)}</td>
+                      <td className="px-5 py-3 text-slate-900">{formatEvidenceValue(ev.field, ev.value)}</td>
                       <td className="px-5 py-3">
                         <div className="text-slate-700">{ev.source_document}</div>
                         {ev.location && <div className="text-xs text-slate-500">{ev.location}</div>}
@@ -302,12 +335,11 @@ export function DealDetail() {
                     </div>
                     <div className="flex-1 min-w-0">
                       <div className="flex items-center justify-between gap-2 mb-1">
-                        <span className="text-sm font-medium text-slate-900 truncate" title={g.description}>{g.description}</span>
+                        <span className="text-sm font-medium text-slate-900 truncate" title={g.description}>{formatGateKey(g.gate, g.threshold)}</span>
                         <span className="text-[10px] uppercase text-slate-500 bg-slate-100 px-1.5 py-0.5 rounded shrink-0">{g.kind}</span>
                       </div>
                       <div className="text-xs text-slate-500 font-mono flex items-center justify-between">
                         <span>Actual: <span className={cn("font-medium", g.passed ? "text-slate-700" : "text-red-600")}>{formatGateValue(g.gate, g.actual)}</span></span>
-                        <span>Req: {g.comparator} {formatGateValue(g.gate, g.threshold)}</span>
                       </div>
                     </div>
                   </div>
@@ -344,8 +376,39 @@ export function DealDetail() {
 
 function formatGateValue(gate: string, value: number | null): string {
   if (value === null) return '—';
-  if (gate.includes('rate') || gate.includes('pct')) return formatRate(value);
+  if (gate.includes('rate') || gate.includes('pct') || gate.includes('ltv')) return formatRate(value);
   if (gate.includes('dscr')) return formatDSCR(value);
   if (gate.includes('price')) return formatMoney(value);
+  return String(value);
+}
+
+function formatGateKey(gate: string, threshold: number | null): string {
+  const t = formatGateValue(gate, threshold);
+  switch (gate) {
+    case 'tenant_count_min': return `Min ${t} tenants`;
+    case 'largest_tenant_pct_max': return `Max ${t} single tenant`;
+    case 'absolute_max_price': return `Max price ${t}`;
+    case 'max_ltv': return `Max LTV ${t}`;
+    case 'min_normalized_cap_rate': return `Min normalized cap ${t}`;
+    case 'min_base_dscr': return `Min DSCR ${t}`;
+    default: return gate.replace(/_/g, ' ');
+  }
+}
+
+function formatEvidenceValue(field: string, value: any): string {
+  if (value === null || value === undefined) return '—';
+  if (typeof value === 'object') return JSON.stringify(value);
+  if (typeof value === 'number') {
+    const f = field.toLowerCase();
+    if (f.includes('price') || f.includes('noi') || f.includes('income') || f.includes('expenses') || f.includes('rent')) {
+      return formatMoney(value);
+    }
+    if (f.endsWith('_pct') || f.includes('cap_rate')) {
+      return value <= 1 ? formatRate(value) : formatRate(value / 100);
+    }
+    if (f.includes('sqft') || f.includes('count')) {
+      return new Intl.NumberFormat('en-US').format(value);
+    }
+  }
   return String(value);
 }

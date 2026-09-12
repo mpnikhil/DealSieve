@@ -512,6 +512,50 @@ export const mockOpportunityDetail: OpportunityDetail = {
       source_timestamp: null,
       confidence: 1.0,
       observed_by: "acquisition_agent"
+    },
+    {
+      evidence_id: "ev_4",
+      field: "largest_tenant_pct",
+      value: 0.19,
+      source_document: "rent_roll.xlsx",
+      location: "Row 15",
+      quote: "Tenant A occupies 19% of NRA",
+      source_timestamp: null,
+      confidence: 0.95,
+      observed_by: "agent"
+    },
+    {
+      evidence_id: "ev_5",
+      field: "building_sqft",
+      value: 20000,
+      source_document: "om_attachment_1.pdf",
+      location: "Page 2",
+      quote: "Total rentable area: 20,000 SF",
+      source_timestamp: null,
+      confidence: 1.0,
+      observed_by: "agent"
+    },
+    {
+      evidence_id: "ev_4",
+      field: "largest_tenant_pct",
+      value: 0.19,
+      source_document: "rent_roll.xlsx",
+      location: "Row 15",
+      quote: "Tenant A occupies 19% of NRA",
+      source_timestamp: null,
+      confidence: 0.95,
+      observed_by: "agent"
+    },
+    {
+      evidence_id: "ev_5",
+      field: "building_sqft",
+      value: 20000,
+      source_document: "om_attachment_1.pdf",
+      location: "Page 2",
+      quote: "Total rentable area: 20,000 SF",
+      source_timestamp: null,
+      confidence: 1.0,
+      observed_by: "agent"
     }
   ],
   skeptic_reports: [
@@ -542,7 +586,7 @@ export const mockOpportunityDetail: OpportunityDetail = {
         "Is there a recent Phase I available?",
         "Could you provide the 2024 and 2025 YTD CAM reconciliation?"
       ],
-      status: "pending",
+      status: "approved",
       created_at: new Date(Date.now() - 1000 * 60 * 60 * 1.8).toISOString(),
       decided_at: null,
       sent_at: null

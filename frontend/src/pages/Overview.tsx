@@ -98,7 +98,7 @@ export function Overview({ setPolicyVersion }: { setPolicyVersion: (v: string) =
                     {formatMoney(item.max_viable_price)}
                   </td>
                   <td className="px-4 py-3 text-right">
-                    <DistanceCell distance_pct={item.distance_pct} />
+                    <DistanceCell item={item} />
                   </td>
                   <td className="px-4 py-3">
                     <div className="flex flex-wrap gap-1">
@@ -141,19 +141,22 @@ function StatCard({ label, value, highlight }: { label: string, value: number, h
   );
 }
 
-function DistanceCell({ distance_pct }: { distance_pct: number | null }) {
-  if (distance_pct === null) return <span className="text-slate-400">—</span>;
-  
-  const isNegative = distance_pct < 0;
-  const pctStr = `${(distance_pct * 100).toFixed(1)}%`;
-  const barWidth = Math.min(Math.abs(distance_pct) * 100 * 2, 100); // Scale 50% distance to 100% width
-  
+function DistanceCell({ item }: { item: WatchlistItem }) {
+  if (item.status === 'REVIEW') {
+    return <span className="text-xs font-medium text-green-600/80">passes</span>;
+  }
+  if (item.max_viable_price === null) {
+    return <span className="text-xs italic text-slate-400">no viable price</span>;
+  }
+  if (item.distance_pct === null) return <span className="text-slate-400">—</span>;
+
+  const pct = Math.max(item.distance_pct, 0);
+  const barWidth = (Math.min(pct, 0.5) / 0.5) * 100; // 50% distance fills the bar
+
   return (
     <div className="flex flex-col items-end gap-1">
-      <span className={`font-mono tabular-nums text-xs ${isNegative ? 'text-green-600' : 'text-slate-700'}`}>
-        {isNegative ? '' : '+'}{pctStr}
-      </span>
-      {distance_pct > 0 && (
+      <span className="font-mono tabular-nums text-xs text-slate-700">+{(pct * 100).toFixed(1)}%</span>
+      {pct > 0 && (
         <div className="w-16 h-1 bg-slate-100 rounded-full overflow-hidden flex justify-end">
           <div className="h-full bg-orange-400" style={{ width: `${barWidth}%` }} />
         </div>
