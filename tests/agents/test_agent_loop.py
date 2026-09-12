@@ -134,9 +134,10 @@ def test_script_02_crosses_into_review_and_interrupts_exactly_once(
     assert "safety net" not in outcome.summary
 
     types = fake_repo.event_types(outcome.opportunity_id)
-    assert types[-3:] == [
+    assert types[-4:] == [
         EventType.SKEPTIC_REVIEW_COMPLETED.value,
         EventType.BROKER_DRAFT_CREATED.value,
+        EventType.DILIGENCE_REQUESTED.value,
         EventType.HUMAN_NOTIFIED.value,
     ]
 
@@ -149,6 +150,8 @@ def test_script_02_crosses_into_review_and_interrupts_exactly_once(
 
     draft = fake_repo.list_drafts(opportunity_id=outcome.opportunity_id)[0]
     assert draft.status == "pending" and len(draft.questions) == 3
+    assert len(fake_repo.list_diligence_requests(outcome.opportunity_id)) == 3
+    assert any(action.action == "approve" for action in recording_notifier.sent[0].actions)
     # The inbound message's subject is already a reply ("Re: Off-market"); the draft must not
     # double the prefix into "Re: Re: Off-market".
     assert draft.subject == "Re: Off-market"

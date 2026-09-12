@@ -14,7 +14,8 @@ Script shape::
         {"tool_calls": [{"name": "underwrite", "input": {}}]},
         {"final_text": "Recorded, underwrote: WATCH. No human attention required."}
       ],
-      "structured_outputs": {"SkepticOutput": {...}}
+      "structured_outputs": {"SkepticOutput": {...}},
+      "structured_output_refs": {"DocumentAnalysisOutput": "fixtures/expected/analysis_05_inspection_report.json"}
     }
 
 * Each ``stream()`` call consumes the next turn, in order.
@@ -23,6 +24,10 @@ Script shape::
 * Structured-output requests do **not** consume a turn: Strands registers a tool named after the
   Pydantic model, so when that name shows up in ``tool_specs`` (or in ``tool_choice``) the answer
   comes from ``structured_outputs``.
+* ``structured_output_refs`` maps a model name to a JSON file (path relative to the repository root)
+  holding that structured output, so a fixture can point straight at a golden file
+  (``fixtures/expected/analysis_05_inspection_report.json``) instead of duplicating it inline. An
+  inline ``structured_outputs`` entry for the same name wins.
 """
 
 from __future__ import annotations
@@ -111,7 +116,24 @@ def load_script(path: str | Path, *, repo_root: Path | None = None) -> tuple[lis
     structured = data.get("structured_outputs", {})
     if not isinstance(structured, dict):
         raise ScriptError(f"structured_outputs must be an object in {script_path}")
-    return turns, structured
+
+    refs = data.get("structured_output_refs", {})
+    if not isinstance(refs, dict):
+        raise ScriptError(f"structured_output_refs must be an object in {script_path}")
+    resolved: dict[str, Any] = {}
+    for name, ref in refs.items():
+        ref_path = Path(ref)
+        if not ref_path.is_absolute():
+            ref_path = root / ref_path
+        if not ref_path.exists():
+            raise ScriptError(f"structured_output_refs[{name}] does not exist: {ref_path}")
+        loaded = json.loads(ref_path.read_text(encoding="utf-8"))
+        if not isinstance(loaded, dict):
+            raise ScriptError(f"structured_output_refs[{name}] must contain a JSON object: {ref_path}")
+        resolved[str(name)] = loaded
+
+    # An inline structured_outputs entry always wins over a reference to a file.
+    return turns, {**resolved, **structured}
 
 
 class ScriptedModel(Model):

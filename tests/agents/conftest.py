@@ -17,6 +17,8 @@ from dealsieve.schemas import (
     Attachment,
     Channel,
     ConstraintKind,
+    DiligenceRequest,
+    DocumentAnalysis,
     Evidence,
     ExpenseClaims,
     ExpenseLine,
@@ -58,11 +60,27 @@ class FakeRepo:
     skeptic_reports: list[SkepticReport] = field(default_factory=list)
     drafts: dict[str, OutboundDraft] = field(default_factory=dict)
     notifications: list[Notification] = field(default_factory=list)
+    diligence_requests: dict[str, DiligenceRequest] = field(default_factory=dict)
+    document_analyses: dict[str, DocumentAnalysis] = field(default_factory=dict)
+    message_statuses: dict[str, str] = field(default_factory=dict)
     _next_deal: int = 101
 
     # messages
     def store_inbound_message(self, message: InboundMessage) -> None:
         self.messages[message.message_id] = message
+
+    def claim_message(self, message: InboundMessage) -> bool:
+        if self.message_statuses.get(message.message_id) == "completed":
+            return False
+        self.messages[message.message_id] = message
+        self.message_statuses[message.message_id] = "processing"
+        return True
+
+    def mark_message_completed(self, message_id: str) -> None:
+        self.message_statuses[message_id] = "completed"
+
+    def mark_message_failed(self, message_id: str, error: str) -> None:
+        self.message_statuses[message_id] = "failed"
 
     def message_exists(self, message_id: str) -> bool:
         return message_id in self.messages
@@ -147,6 +165,12 @@ class FakeRepo:
     def store_draft(self, draft: OutboundDraft) -> None:
         self.drafts[draft.draft_id] = draft
 
+    def get_draft(self, draft_id: str) -> OutboundDraft | None:
+        return self.drafts.get(draft_id)
+
+    def update_draft(self, draft: OutboundDraft) -> None:
+        self.drafts[draft.draft_id] = draft
+
     def list_drafts(self, status: str | None = None, opportunity_id: str | None = None) -> list[OutboundDraft]:
         return [
             d
@@ -156,11 +180,54 @@ class FakeRepo:
         ]
 
     def store_notification(self, notification: Notification) -> None:
+        from dealsieve.persistence import DuplicateNotification
+
+        if notification.dedupe_key and any(
+            existing.dedupe_key == notification.dedupe_key for existing in self.notifications
+        ):
+            raise DuplicateNotification(notification.dedupe_key)
         self.notifications.append(notification)
+
+    def update_notification(self, notification: Notification) -> None:
+        for index, existing in enumerate(self.notifications):
+            if existing.notification_id == notification.notification_id:
+                self.notifications[index] = notification
+                return
+        raise KeyError(notification.notification_id)
 
     def list_notifications(self, opportunity_id: str | None = None) -> list[Notification]:
         return [
             n for n in self.notifications if opportunity_id is None or n.opportunity_id == opportunity_id
+        ]
+
+    # diligence and document analysis
+    def store_diligence_request(self, request: DiligenceRequest) -> None:
+        self.diligence_requests[request.request_id] = request
+
+    def update_diligence_request(self, request: DiligenceRequest) -> None:
+        self.diligence_requests[request.request_id] = request
+
+    def get_diligence_request(self, request_id: str) -> DiligenceRequest | None:
+        return self.diligence_requests.get(request_id)
+
+    def list_diligence_requests(
+        self, opportunity_id: str | None = None, status: str | None = None
+    ) -> list[DiligenceRequest]:
+        return [
+            request
+            for request in self.diligence_requests.values()
+            if (opportunity_id is None or request.opportunity_id == opportunity_id)
+            and (status is None or request.status == status)
+        ]
+
+    def store_document_analysis(self, analysis: DocumentAnalysis) -> None:
+        self.document_analyses[analysis.analysis_id] = analysis
+
+    def list_document_analyses(self, opportunity_id: str) -> list[DocumentAnalysis]:
+        return [
+            analysis
+            for analysis in self.document_analyses.values()
+            if analysis.opportunity_id == opportunity_id
         ]
 
 
@@ -321,6 +388,7 @@ def fake_threshold_alert(
     skeptic: SkepticReport | None,
     *,
     channel: Channel = Channel.TELEGRAM,
+    pending_request: OutboundDraft | None = None,
 ) -> Notification:
     """Stand-in for W4's `format_threshold_alert`."""
     return Notification(
@@ -329,7 +397,14 @@ def fake_threshold_alert(
         channel=channel,
         title=f"DEAL #{opportunity.deal_number} JUST BECAME INVESTABLE",
         body=f"{opportunity.display_name}\n{new_run.failure_summary}",
-        actions=[NotificationAction(label="Review", action="review")],
+        actions=[
+            NotificationAction(label="Review", action="review"),
+            *(
+                [NotificationAction(label="Approve broker questions", action="approve")]
+                if pending_request is not None
+                else []
+            ),
+        ],
     )
 
 

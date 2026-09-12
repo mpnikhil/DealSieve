@@ -6,7 +6,9 @@ Subcommands: ingest <file.eml|.txt>, seed, reset, serve [--port], telegram-bot, 
 from __future__ import annotations
 
 import argparse
+import json
 import sys
+from datetime import UTC, datetime, time
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -137,6 +139,57 @@ def _cmd_status(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_followup(args: argparse.Namespace) -> int:
+    from dealsieve.diligence import run_follow_ups
+    from dealsieve.notifications import get_notifier
+    from dealsieve.outbound import get_outbox
+    from dealsieve.persistence import Repo
+    from dealsieve.policy import load_policy
+
+    repo = Repo(args.db) if args.db else Repo()
+    repo.init_schema()
+    policy = load_policy(args.policy) if args.policy else load_policy()
+    as_of = None
+    if args.as_of:
+        try:
+            parsed = datetime.fromisoformat(args.as_of)
+            as_of = (
+                datetime.combine(parsed.date(), time.max, tzinfo=UTC)
+                if "T" not in args.as_of
+                else parsed
+            )
+            if as_of.tzinfo is None:
+                as_of = as_of.replace(tzinfo=UTC)
+        except ValueError:
+            print("error: --as-of must be YYYY-MM-DD or an ISO-8601 datetime", file=sys.stderr)
+            return 2
+    report = run_follow_ups(
+        repo=repo,
+        policy=policy,
+        outbox=get_outbox(policy),
+        notifier=get_notifier(),
+        as_of=as_of,
+    )
+    print(json.dumps(report.model_dump(mode="json"), default=str, indent=2))
+    return 0
+
+
+def _cmd_outbox(args: argparse.Namespace) -> int:
+    from dealsieve.persistence import Repo
+
+    repo = Repo(args.db) if args.db else Repo()
+    repo.init_schema()
+    sent = repo.list_drafts(status="sent")
+    if not sent:
+        print("No sent broker messages.")
+        return 0
+    for draft in sent:
+        timestamp = draft.sent_at.isoformat() if draft.sent_at else "unknown time"
+        recipient = draft.to_email or "unknown recipient"
+        print(f"{timestamp}  {draft.kind:<19}  {recipient}  {draft.subject}  [{draft.delivery_ref or '-'}]")
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="dealsieve", description="DealSieve: persistent acquisition agent.")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -167,6 +220,16 @@ def build_parser() -> argparse.ArgumentParser:
     p_status.add_argument("--db", default=None, help="Override DEALSIEVE_DB_PATH")
     p_status.add_argument("--policy", default=None, help="Override DEALSIEVE_POLICY_PATH")
     p_status.set_defaults(func=_cmd_status)
+
+    p_followup = sub.add_parser("followup", help="Send due approved-thread follow-ups and escalate stalls.")
+    p_followup.add_argument("--as-of", default=None, help="Run cadence as of YYYY-MM-DD or ISO-8601 datetime")
+    p_followup.add_argument("--db", default=None, help="Override DEALSIEVE_DB_PATH")
+    p_followup.add_argument("--policy", default=None, help="Override DEALSIEVE_POLICY_PATH")
+    p_followup.set_defaults(func=_cmd_followup)
+
+    p_outbox = sub.add_parser("outbox", help="List broker messages that have been sent.")
+    p_outbox.add_argument("--db", default=None, help="Override DEALSIEVE_DB_PATH")
+    p_outbox.set_defaults(func=_cmd_outbox)
 
     return parser
 

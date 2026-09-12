@@ -5,6 +5,15 @@ subject, body_text (prefer text/plain, else html->text), thread_id from Referenc
 attachments with sha256 and extracted text for application/pdf (pypdf), text/*, and .md/.txt/.csv.
 Also collect URLs found in the body into InboundMessage.urls. Preserve raw bytes to data/raw/<message_id>.eml
 when raw_dir is given and set raw_ref.
+
+Phase 2 (W10a): also extract images so the Inspector agent has something to look at. Embedded images
+inside `application/pdf` attachments are pulled out with pypdf's `page.images`, filtered to at least
+200x200 px (thumbnails/logos are noise), re-encoded as PNG with Pillow, and written under
+`DEALSIEVE_DOCS_DIR` (default `data/documents`)/<attachment sha256>/img_<n>.png, numbered from 1 in
+page order. A standalone `image/*` attachment is stored the same way as a single image (img_1.png),
+no size filter. `Attachment.image_paths` is set to the resulting paths. Any failure to read the PDF or
+decode a given image is swallowed per-image/per-page: a broken embedded image or a PDF with none must
+never fail parsing of the message.
 """
 
 from __future__ import annotations
@@ -21,6 +30,7 @@ from io import BytesIO
 from pathlib import Path
 
 import pypdf
+from PIL import Image
 
 from dealsieve.schemas import Attachment, Channel, InboundMessage
 
@@ -32,6 +42,10 @@ _WHITESPACE_RE = re.compile(r"\s+")
 _SANITIZE_RE = re.compile(r"[^A-Za-z0-9_.-]")
 
 _TEXT_EXTENSIONS = {".md", ".txt", ".csv"}
+
+# Embedded PDF images smaller than this in either dimension are treated as decoration (bullet
+# icons, letterhead logos, thin dividers) rather than photographs worth showing an inspector.
+_MIN_IMAGE_DIM = 200
 
 
 def _strip_angle(value: str | None) -> str | None:
@@ -82,6 +96,91 @@ def _attachment_text(content_type: str, filename: str | None, raw_bytes: bytes) 
     return None
 
 
+def _docs_dir() -> Path:
+    """Read the docs root at call time (not import time) so tests can monkeypatch the env var."""
+    return Path(os.environ.get("DEALSIEVE_DOCS_DIR", "data/documents"))
+
+
+def _pil_image_to_png_bytes(image: Image.Image) -> bytes | None:
+    try:
+        if image.mode not in ("RGB", "RGBA", "L"):
+            image = image.convert("RGB")
+        buf = BytesIO()
+        image.save(buf, format="PNG")
+        return buf.getvalue()
+    except Exception:
+        return None
+
+
+def _extract_pdf_images_png(raw_bytes: bytes) -> list[bytes]:
+    """Embedded images from a PDF, in page order, filtered to >= 200x200 px, as PNG bytes.
+
+    Defensive at every level: an unreadable PDF, a page whose image list cannot be enumerated, or
+    a single image that fails to decode must never raise -- they are just skipped.
+    """
+    pngs: list[bytes] = []
+    try:
+        reader = pypdf.PdfReader(BytesIO(raw_bytes))
+    except Exception:
+        return pngs
+
+    for page in reader.pages:
+        try:
+            images = list(page.images)
+        except Exception:
+            continue
+        for image_file in images:
+            try:
+                image = image_file.image
+                if image is None or image.width < _MIN_IMAGE_DIM or image.height < _MIN_IMAGE_DIM:
+                    continue
+                png_bytes = _pil_image_to_png_bytes(image)
+            except Exception:
+                png_bytes = None
+            if png_bytes is not None:
+                pngs.append(png_bytes)
+    return pngs
+
+
+def _standalone_image_to_png(raw_bytes: bytes) -> list[bytes]:
+    """An `image/*` attachment is stored the same way as a single extracted image."""
+    try:
+        image = Image.open(BytesIO(raw_bytes))
+        image.load()
+    except Exception:
+        return []
+    png_bytes = _pil_image_to_png_bytes(image)
+    return [png_bytes] if png_bytes is not None else []
+
+
+def _store_images(png_images: list[bytes], sha256: str) -> list[str]:
+    if not png_images:
+        return []
+    try:
+        out_dir = _docs_dir() / sha256
+        out_dir.mkdir(parents=True, exist_ok=True)
+        paths: list[str] = []
+        for n, data in enumerate(png_images, start=1):
+            path = out_dir / f"img_{n}.png"
+            path.write_bytes(data)
+            paths.append(str(path))
+        return paths
+    except Exception:
+        return []
+
+
+def _extract_and_store_images(content_type: str, filename: str | None, raw_bytes: bytes, sha256: str) -> list[str]:
+    ext = Path(filename).suffix.lower() if filename else ""
+    try:
+        if content_type.lower().startswith("image/"):
+            return _store_images(_standalone_image_to_png(raw_bytes), sha256)
+        if content_type.lower() == "application/pdf" or ext == ".pdf":
+            return _store_images(_extract_pdf_images_png(raw_bytes), sha256)
+    except Exception:
+        return []
+    return []
+
+
 def _load_raw(source: bytes | str | os.PathLike[str]) -> bytes:
     if isinstance(source, bytes):
         return source
@@ -120,13 +219,15 @@ def parse_eml(
         raw_bytes = part.get_payload(decode=True) or b""
         filename = part.get_filename() or f"attachment_{idx}"
         content_type = part.get_content_type()
+        sha256 = hashlib.sha256(raw_bytes).hexdigest()
         attachments.append(
             Attachment(
                 filename=filename,
                 content_type=content_type,
-                sha256=hashlib.sha256(raw_bytes).hexdigest(),
+                sha256=sha256,
                 size_bytes=len(raw_bytes),
                 text=_attachment_text(content_type, filename, raw_bytes),
+                image_paths=_extract_and_store_images(content_type, filename, raw_bytes, sha256),
             )
         )
 

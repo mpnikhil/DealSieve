@@ -177,7 +177,7 @@ def test_opportunity_detail_404_for_unknown_id(client: TestClient) -> None:
 # --------------------------------------------------------------------------------------- drafts
 
 
-def test_draft_approve_records_event_and_never_sends(client: TestClient, repo) -> None:
+def test_draft_approve_records_event_and_sends(client: TestClient, repo) -> None:
     opp = _make_opportunity(repo, status=OpportunityStatus.REVIEW)
     draft = OutboundDraft(
         opportunity_id=opp.opportunity_id,
@@ -192,11 +192,11 @@ def test_draft_approve_records_event_and_never_sends(client: TestClient, repo) -
     assert r.status_code == 200
     body = r.json()
     assert body["draft_id"] == draft.draft_id
-    assert body["status"] == "approved"
+    assert body["status"] == "sent"
     assert body["decided_at"] is not None
 
     stored = repo.get_draft(draft.draft_id)
-    assert stored.status == "approved"
+    assert stored.status == "sent"
 
     events = repo.list_events(opp.opportunity_id)
     approved_events = [e for e in events if e.type == EventType.HUMAN_APPROVED_DRAFT]
@@ -204,8 +204,10 @@ def test_draft_approve_records_event_and_never_sends(client: TestClient, repo) -
     assert approved_events[0].actor == Actor.HUMAN
     assert approved_events[0].payload["draft_id"] == draft.draft_id
 
-    # Nothing resembling a send happened: no BROKER_MESSAGE_SENT event.
-    assert not any(e.type == EventType.BROKER_MESSAGE_SENT for e in events)
+    # With Phase 2 diligence, approval dispatches via outbox and records BROKER_MESSAGE_SENT.
+    sent_events = [e for e in events if e.type == EventType.BROKER_MESSAGE_SENT]
+    assert len(sent_events) == 1
+
 
 
 def test_draft_reject_records_event(client: TestClient, repo) -> None:

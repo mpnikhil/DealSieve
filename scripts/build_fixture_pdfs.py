@@ -18,7 +18,7 @@ Deterministic: fixed creation date, fixed text, fixed image files -> byte-identi
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 from fpdf import FPDF
@@ -31,7 +31,7 @@ ADDRESS = "8330 Power Inn Road, Sacramento, CA 95826"
 SITE_VISIT_DATE = "2026-06-18"
 REPORT_DATE = "2026-06-25"
 FIRM_NAME = "Delta Building Consultants, Inc."
-CREATION_DATE = datetime(2026, 6, 25, 9, 0, 0, tzinfo=timezone.utc)
+CREATION_DATE = datetime(2026, 6, 25, 9, 0, 0, tzinfo=UTC)
 
 PAGE_WIDTH_MM = 210.0
 MARGIN_MM = 20.0
@@ -111,7 +111,7 @@ class ConditionReportPDF(FPDF):
         self.set_fill_color(230, 230, 230)
         self.set_draw_color(140, 140, 140)
         self.set_line_width(0.2)
-        for header, width in zip(headers, col_widths):
+        for header, width in zip(headers, col_widths, strict=True):
             self.cell(width, row_height, header, border=1, align="L", fill=True)
         self.ln(row_height)
         self.set_font("helvetica", "", body_size)
@@ -119,7 +119,7 @@ class ConditionReportPDF(FPDF):
             fill = row_index % 2 == 1
             if fill:
                 self.set_fill_color(245, 245, 245)
-            for value, width in zip(row, col_widths):
+            for value, width in zip(row, col_widths, strict=True):
                 self.cell(width, row_height, value, border=1, align="L", fill=fill)
             self.ln(row_height)
         self.ln(3)

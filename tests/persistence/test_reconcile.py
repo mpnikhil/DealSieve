@@ -5,7 +5,7 @@ from decimal import Decimal
 import pytest
 
 from dealsieve.evidence.reconcile import MissingInputs, reconcile
-from dealsieve.schemas import EventType, Evidence, ExpenseClaims, ExtractedClaims, TenantClaim
+from dealsieve.schemas import CapexItem, EventType, Evidence, ExpenseClaims, ExtractedClaims, TenantClaim
 
 
 def test_first_claims_establish_working_values_from_gross_income():
@@ -177,3 +177,128 @@ def test_expense_subfields_merge_field_by_field():
     assert working2.stated_expenses.property_tax == Decimal("15000")  # kept
     assert working2.stated_expenses.insurance == Decimal("8000")  # kept
     assert working2.stated_expenses.utilities == Decimal("11000")  # newly added
+
+
+# --------------------------------------------------------------------------- R7: reconciled value must
+# never contradict the winning evidence
+
+
+def test_r7_higher_confidence_evidence_overrides_disagreeing_top_level_claim():
+    """The exact scenario from the review: the extractor's own top-level asking_price (1,500,000)
+    disagrees with a higher-confidence piece of evidence it recorded (1,600,000). The reconciled
+    value must be the evidence's value, with the disagreement recorded as a conflict and
+    provenance pointing at the winning evidence."""
+    claims = ExtractedClaims(
+        asking_price=Decimal("1500000"),
+        stated_gross_income=Decimal("180000"),
+        evidence=[
+            Evidence(field="asking_price", value=1600000, source_document="OM.pdf", confidence=0.95),
+        ],
+    )
+    working, _ = reconcile(None, claims)
+
+    assert working.asking_price == Decimal("1600000")
+    assert any("1500000" in c and "1600000" in c and "asking_price" in c for c in working.conflicts)
+    assert working.provenance["asking_price"] == claims.evidence[0].evidence_id
+
+
+def test_r7_evidence_value_is_coerced_to_field_type():
+    claims = ExtractedClaims(
+        asking_price=Decimal("1000000"),
+        stated_gross_income=Decimal("150000"),
+        evidence=[Evidence(field="building_sqft", value="20000", source_document="OM.pdf", confidence=0.9)],
+    )
+    working, _ = reconcile(None, claims)
+    assert working.building_sqft == 20000
+    assert isinstance(working.building_sqft, int)
+
+
+def test_r7_no_conflict_recorded_when_top_level_claim_agrees_with_winning_evidence():
+    claims = ExtractedClaims(
+        asking_price=Decimal("1550000"),
+        stated_gross_income=Decimal("180000"),
+        evidence=[Evidence(field="asking_price", value=1550000, source_document="email body", confidence=0.95)],
+    )
+    working, _ = reconcile(None, claims)
+    assert working.asking_price == Decimal("1550000")
+    assert working.conflicts == []
+
+
+def test_r7_asking_price_changed_event_uses_evidence_corrected_value():
+    """Change detection (and its payload) must reflect the corrected value, not the raw claim."""
+    initial = ExtractedClaims(asking_price=Decimal("1550000"), stated_gross_income=Decimal("180000"))
+    working1, _ = reconcile(None, initial)
+
+    price_drop = ExtractedClaims(
+        asking_price=Decimal("1300000"),  # what the extractor's summary field says
+        is_price_change=True,
+        evidence=[
+            Evidence(field="asking_price", value=1250000, source_document="email body", confidence=0.97)
+        ],  # what the source actually says, at higher confidence
+    )
+    working2, changes = reconcile(working1, price_drop)
+
+    assert working2.asking_price == Decimal("1250000")
+    price_changes = [c for c in changes if c.type == EventType.ASKING_PRICE_CHANGED]
+    assert len(price_changes) == 1
+    assert price_changes[0].payload["to"] == pytest.approx(1250000.0)
+    assert any("asking_price" in c for c in working2.conflicts)
+
+
+def test_r7_evidence_field_without_caster_is_left_to_existing_merge_logic():
+    """Evidence tagged with a field name outside _EVIDENCE_FIELD_CASTERS (e.g. a rent-roll note)
+    must not blow up reconcile and must not silently mutate an unrelated WorkingValues field."""
+    claims = ExtractedClaims(
+        asking_price=Decimal("1000000"),
+        stated_gross_income=Decimal("150000"),
+        evidence=[Evidence(field="roof_age", value="2001", source_document="OM.pdf", confidence=0.8)],
+    )
+    working, _ = reconcile(None, claims)
+    assert working.asking_price == Decimal("1000000")
+    assert working.provenance["roof_age"] == claims.evidence[0].evidence_id
+    assert working.conflicts == []
+
+
+@pytest.mark.parametrize("evidence_field", ["stated_gross_income", "gross_scheduled_income"])
+def test_r7_gross_income_evidence_alias_overrides_claim_and_records_conflict(evidence_field):
+    claims = ExtractedClaims(
+        asking_price=Decimal("1000000"),
+        stated_gross_income=Decimal("180000"),
+        evidence=[
+            Evidence(
+                field=evidence_field,
+                value="190000",
+                source_document="OM.pdf",
+                confidence=0.95,
+            )
+        ],
+    )
+
+    working, _ = reconcile(None, claims)
+
+    assert working.gross_scheduled_income == Decimal("190000")
+    assert working.provenance["gross_scheduled_income"] == claims.evidence[0].evidence_id
+    assert any("180000" in conflict and "190000" in conflict for conflict in working.conflicts)
+
+
+def test_reconcile_preserves_capex_added_by_document_analysis():
+    initial = ExtractedClaims(
+        asking_price=Decimal("1000000"),
+        stated_gross_income=Decimal("180000"),
+    )
+    working, _ = reconcile(None, initial)
+    capex = CapexItem(
+        item="Roof replacement",
+        low=Decimal("85000"),
+        high=Decimal("95000"),
+        urgency="immediate",
+        source_document="inspection.pdf",
+    )
+    with_capex = working.model_copy(
+        update={"immediate_capex": Decimal("90000"), "capex_items": [capex]}
+    )
+
+    updated, _ = reconcile(with_capex, ExtractedClaims(notes="No new economics"))
+
+    assert updated.immediate_capex == Decimal("90000")
+    assert updated.capex_items == [capex]

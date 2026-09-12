@@ -198,6 +198,7 @@ async def test_structured_output_without_a_scripted_answer_raises(tmp_path: Path
         "02_price_drop",
         "03_structural_single_tenant",
         "04_obvious_economic_failure",
+        "05_inspection_report",
     ],
 )
 def test_every_shipped_script_loads_and_references_real_claims(name: str):
@@ -217,15 +218,15 @@ def test_the_price_drop_script_runs_the_full_review_procedure():
         "record_claims",
         "underwrite",
         "request_skeptic_review",
-        "draft_broker_questions",
+        "request_diligence",
         "notify_human",
     ]
 
-    questions = next(
-        c.input["questions"] for turn in turns for c in turn.tool_calls if c.name == "draft_broker_questions"
+    items = next(
+        c.input["items"] for turn in turns for c in turn.tool_calls if c.name == "request_diligence"
     )
-    assert len(questions) == 3
-    joined = " ".join(questions).lower()
+    assert len(items) == 3
+    joined = " ".join(item["topic"] + " " + item["question"] for item in items).lower()
     assert "roof" in joined and "phase i" in joined and "cam reconciliation" in joined
 
     skeptic = structured["SkepticOutput"]
@@ -241,3 +242,17 @@ def test_the_quiet_scripts_never_reach_for_a_human():
         turns, _ = load_script(SCRIPTS / f"{name}.json")
         called = [c.name for turn in turns for c in turn.tool_calls]
         assert called == ["record_claims", "underwrite"], name
+
+
+def test_the_inspection_script_runs_the_fell_below_procedure():
+    turns, structured = load_script(SCRIPTS / "05_inspection_report.json")
+    assert [c.name for turn in turns for c in turn.tool_calls] == [
+        "record_claims",
+        "analyze_document",
+        "underwrite",
+        "request_price_adjustment",
+        "notify_human",
+    ]
+    analysis = structured["DocumentAnalysisOutput"]
+    assert analysis["images_reviewed"] == 3
+    assert any("roof" in item["item"].lower() for item in analysis["capex_items"])

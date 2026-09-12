@@ -192,7 +192,9 @@ def test_the_safety_net_does_not_double_notify(
         perform_record_claims(session, claims)
         perform_underwrite(session)
         tools_module.perform_skeptic_review(session)
-        tools_module.perform_draft_broker_questions(session, ["How old is the roof?"])
+        tools_module.perform_request_diligence(
+            session, [{"topic": "Roof age", "question": "How old is the roof?"}]
+        )
         tools_module.perform_notify_human(session, "crossed")
 
     install_agent(monkeypatch, full_procedure)

@@ -10,9 +10,9 @@ from dealsieve.agents import tools as tools_module
 from dealsieve.agents.tools import (
     ProcessingSession,
     make_tools,
-    perform_draft_broker_questions,
     perform_notify_human,
     perform_record_claims,
+    perform_request_diligence,
     perform_skeptic_review,
     perform_underwrite,
 )
@@ -213,21 +213,20 @@ def test_underwrite_links_the_run_to_the_triggering_event(session, claims, fake_
     assert fake_repo.get_underwriting_run(result["run_id"]).trigger_event_id == last_claims_event.event_id
 
 
-def test_threshold_crossed_only_on_entry_into_review(session, claims, monkeypatch):
+def test_threshold_crossed_latches_and_repeated_underwrite_returns_the_same_run(
+    session, claims, fake_repo, monkeypatch
+):
     record(session, claims)
-
-    underwrite_as(session, monkeypatch, OpportunityStatus.WATCH)
-    assert session.threshold_crossed is False
-
-    session.run_after = None
     result = underwrite_as(session, monkeypatch, OpportunityStatus.REVIEW, cap=Decimal("0.083"), dscr=Decimal("1.43"))
     assert session.threshold_crossed is True
     assert result["threshold_crossed"] is True
     assert "request_skeptic_review" in result["next_step"]
 
-    session.run_after = None
-    underwrite_as(session, monkeypatch, OpportunityStatus.REVIEW, cap=Decimal("0.083"), dscr=Decimal("1.43"))
-    assert session.threshold_crossed is False, "staying in REVIEW is not a new crossing"
+    repeated = perform_underwrite(session)
+    assert repeated["run_id"] == result["run_id"]
+    assert repeated["repeated"] is True
+    assert session.threshold_crossed is True
+    assert len(fake_repo.list_underwriting_runs(session.opportunity_id)) == 1
 
 
 def test_underwrite_without_claims_returns_an_error(session):
@@ -278,37 +277,38 @@ def test_skeptic_review_runs_on_review_and_stores_the_report(session, claims, fa
     assert EventType.SKEPTIC_REVIEW_COMPLETED.value in fake_repo.event_types(session.opportunity_id)
 
 
-def test_draft_is_refused_without_a_skeptic_report(session, claims, fake_repo, monkeypatch):
+def test_diligence_is_refused_when_status_is_not_review(session, claims, fake_repo, monkeypatch):
     record(session, claims)
-    underwrite_as(session, monkeypatch, OpportunityStatus.REVIEW, cap=Decimal("0.083"), dscr=Decimal("1.43"))
+    underwrite_as(session, monkeypatch, OpportunityStatus.WATCH)
 
-    result = perform_draft_broker_questions(session, ["How old is the roof?"])
-    assert result == {"skipped": "no skeptic report; call request_skeptic_review first"}
+    result = perform_request_diligence(
+        session, [{"topic": "Roof age", "question": "How old is the roof?"}]
+    )
+    assert "WATCH" in result["skipped"]
     assert fake_repo.list_drafts() == []
 
 
-def test_draft_is_refused_when_the_skeptic_report_is_for_an_older_run(session, claims, monkeypatch):
-    record(session, claims)
-    underwrite_as(session, monkeypatch, OpportunityStatus.REVIEW, cap=Decimal("0.083"), dscr=Decimal("1.43"))
-    session.skeptic_report = make_skeptic_report(session.opportunity_id, "run_stale")
-
-    result = perform_draft_broker_questions(session, ["How old is the roof?"])
-    assert "not for the current underwriting run" in result["skipped"]
-
-
-def test_draft_creates_a_pending_draft_and_sends_nothing(session, claims, fake_repo, monkeypatch):
+def test_diligence_creates_tracked_requests_and_a_pending_draft(
+    session, claims, fake_repo, monkeypatch
+):
     record(session, claims)
     underwrite_as(session, monkeypatch, OpportunityStatus.REVIEW, cap=Decimal("0.083"), dscr=Decimal("1.43"))
     session.skeptic_report = make_skeptic_report(session.opportunity_id, session.run_after.run_id)
 
-    result = perform_draft_broker_questions(session, ["How old is the roof?", "  ", "Phase I?"])
+    result = perform_request_diligence(
+        session,
+        [
+            {"topic": "Roof age", "question": "How old is the roof?"},
+            {"topic": "Phase I environmental", "question": "May we see the Phase I?"},
+        ],
+    )
 
-    assert result["sent"] is False and result["status"] == "pending"
-    assert result["questions"] == ["How old is the roof?", "Phase I?"]
-    assert result["subject"].startswith("Re: ")
+    assert result["awaiting_approval"] is True and result["status"] == "pending"
+    assert len(result["request_ids"]) == 2
     draft = fake_repo.list_drafts(opportunity_id=session.opportunity_id)[0]
     assert draft.status == "pending" and draft.to_email == "broker@brokerage.example"
     assert "How old is the roof?" in draft.body
+    assert len(fake_repo.list_diligence_requests(session.opportunity_id)) == 2
     assert EventType.BROKER_DRAFT_CREATED.value in fake_repo.event_types(session.opportunity_id)
     assert session.notifier.sent == [], "drafting must not interrupt a human"
 
@@ -387,13 +387,15 @@ def test_events_can_be_attributed_to_the_system_actor(session, claims, fake_repo
 # --------------------------------------------------------------------------- the tool surface
 
 
-def test_make_tools_exposes_exactly_the_five_contract_tools(session):
+def test_make_tools_exposes_exactly_the_seven_contract_tools(session):
     built = make_tools(session)
     assert [t.tool_name for t in built] == [
         "record_claims",
+        "analyze_document",
         "underwrite",
         "request_skeptic_review",
-        "draft_broker_questions",
+        "request_diligence",
+        "request_price_adjustment",
         "notify_human",
     ]
 

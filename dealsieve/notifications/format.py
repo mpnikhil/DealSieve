@@ -8,14 +8,18 @@ notifier can render it as a text row inside its box.
 
 from __future__ import annotations
 
+import re
 from decimal import Decimal
 
 from dealsieve.schemas import (
     Channel,
+    DiligenceRequest,
+    DocumentAnalysis,
     GateResult,
     Notification,
     NotificationAction,
     Opportunity,
+    OutboundDraft,
     SkepticReport,
     UnderwritingResult,
 )
@@ -27,6 +31,12 @@ _MAX_UNRESOLVED = 4
 _ACTIONS: list[NotificationAction] = [
     NotificationAction(label="Review", action="review"),
     NotificationAction(label="Draft broker questions", action="draft_questions"),
+    NotificationAction(label="Ignore", action="ignore"),
+]
+
+_PENDING_REQUEST_ACTIONS: list[NotificationAction] = [
+    NotificationAction(label="Review", action="review"),
+    NotificationAction(label="Approve broker questions", action="approve"),
     NotificationAction(label="Ignore", action="ignore"),
 ]
 
@@ -68,6 +78,7 @@ def format_threshold_alert(
     new_run: UnderwritingResult,
     skeptic: SkepticReport | None,
     *,
+    pending_request: OutboundDraft | None = None,
     channel: Channel = Channel.TELEGRAM,
 ) -> Notification:
     """Build the "DEAL #<n> JUST BECAME INVESTABLE" alert.
@@ -121,6 +132,13 @@ def format_threshold_alert(
         if overflow:
             lines.append(f"- +{len(overflow)} more in the dashboard")
 
+    if pending_request is not None and pending_request.kind == "information_request" and pending_request.status == "pending":
+        lines.append("")
+        lines.append(
+            "Awaiting your approval: information request to the broker "
+            f"({len(pending_request.questions)} questions)"
+        )
+
     body = "\n".join(lines)
 
     return Notification(
@@ -129,5 +147,140 @@ def format_threshold_alert(
         channel=channel,
         title=title,
         body=body,
-        actions=list(_ACTIONS),
+        actions=list(_PENDING_REQUEST_ACTIONS if pending_request is not None else _ACTIONS),
+    )
+
+
+def _finding_line(analysis: DocumentAnalysis) -> str | None:
+    if not analysis.findings:
+        return analysis.summary or None
+    rank = {"high": 0, "medium": 1, "low": 2, "info": 3}
+    findings = sorted(analysis.findings, key=lambda finding: rank[finding.severity])[:3]
+    return "; ".join(
+        f"{finding.topic}: {finding.value}" + (f", {finding.detail}" if finding.detail else "")
+        for finding in findings
+    )
+
+
+def format_fell_below_alert(
+    opportunity: Opportunity,
+    previous_run: UnderwritingResult | None,
+    new_run: UnderwritingResult,
+    analysis: DocumentAnalysis | None,
+    credit_draft: OutboundDraft | None,
+    *,
+    channel: Channel = Channel.TELEGRAM,
+) -> Notification:
+    """Build the alert emitted when diligence moves a REVIEW deal back below threshold."""
+    lines: list[str] = [opportunity.display_name]
+    if analysis is not None:
+        finding = _finding_line(analysis)
+        if finding:
+            lines.extend(["", f"Diligence established: {finding}"])
+        immediate = sum(
+            (item.midpoint for item in analysis.capex_items if item.urgency in {"immediate", "near_term"}),
+            Decimal("0"),
+        )
+        if immediate:
+            lines.append(f"Immediate capex added: {_money(immediate)}")
+
+    old_basis = (
+        previous_run.financing.all_in_basis or previous_run.financing.purchase_price
+        if previous_run
+        else None
+    )
+    new_basis = new_run.financing.all_in_basis or new_run.financing.purchase_price
+    cap_gate = _find_gate(new_run, "min_normalized_cap_rate")
+    dscr_gate = _find_gate(new_run, "min_base_dscr")
+    ltv_gate = _find_gate(new_run, "max_ltv")
+    lines.append("")
+    lines.append(
+        _row(
+            "Price basis",
+            f"{_money(old_basis)} -> {_money(new_basis)}" if old_basis is not None else _money(new_basis),
+        )
+    )
+    lines.append(
+        _row(
+            "Normalized cap",
+            (
+                f"{_pct(previous_run.normalized.normalized_cap_rate)} -> "
+                f"{_pct(new_run.normalized.normalized_cap_rate)}"
+                if previous_run
+                else _pct(new_run.normalized.normalized_cap_rate)
+            ),
+            _status(cap_gate),
+        )
+    )
+    lines.append(
+        _row(
+            "DSCR",
+            (
+                f"{_dscr(previous_run.financing.dscr)} -> {_dscr(new_run.financing.dscr)}"
+                if previous_run
+                else _dscr(new_run.financing.dscr)
+            ),
+            _status(dscr_gate),
+        )
+    )
+    lines.append(
+        _row(
+            "LTV",
+            (
+                f"{_pct(previous_run.financing.ltv)} -> {_pct(new_run.financing.ltv)}"
+                if previous_run
+                else _pct(new_run.financing.ltv)
+            ),
+            _status(ltv_gate),
+        )
+    )
+    lines.extend(["", f"New status: {new_run.status.value}"])
+    frontier = new_run.viability.max_viable_price
+    if frontier is not None:
+        distance = new_run.viability.distance_pct
+        suffix = f", {_pct(distance, decimals=1)} under the ask" if distance is not None else ""
+        lines.append(f"Viable below {_money(frontier)}{suffix}")
+    if credit_draft is not None:
+        amount_match = re.search(r"\$[\d,]+", credit_draft.body)
+        amount = amount_match.group(0) if amount_match else "the required"
+        lines.extend(["", f"Drafted for your approval: request a {amount} credit."])
+
+    return Notification(
+        opportunity_id=opportunity.opportunity_id,
+        kind="fell_below_threshold",
+        channel=channel,
+        title=f"DEAL #{opportunity.deal_number} FELL BACK BELOW THRESHOLD",
+        body="\n".join(lines),
+        actions=[
+            NotificationAction(label="Review", action="review"),
+            NotificationAction(label="Approve", action="approve"),
+            NotificationAction(label="Reject", action="reject"),
+        ],
+    )
+
+
+def format_stalled_alert(
+    opportunity: Opportunity,
+    requests: list[DiligenceRequest],
+    *,
+    channel: Channel = Channel.TELEGRAM,
+) -> Notification:
+    """Build the one-time escalation after the autonomous follow-up budget is exhausted."""
+    follow_ups = max((request.follow_up_count for request in requests), default=0)
+    topics = ", ".join(request.topic for request in requests)
+    body = (
+        f"{opportunity.display_name}\n\n"
+        f"No reply on {len(requests)} requests after {follow_ups} follow-ups: {topics}. "
+        "The loop has stopped; your move."
+    )
+    return Notification(
+        opportunity_id=opportunity.opportunity_id,
+        kind="diligence_stalled",
+        channel=channel,
+        title=f"DEAL #{opportunity.deal_number} DILIGENCE STALLED",
+        body=body,
+        actions=[
+            NotificationAction(label="Review", action="review"),
+            NotificationAction(label="Ignore", action="ignore"),
+        ],
     )

@@ -18,6 +18,7 @@ from pathlib import Path
 from typing import Any, Literal
 
 from fastapi import Depends, FastAPI, HTTPException, Query, Request
+from fastapi.encoders import jsonable_encoder
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
@@ -26,13 +27,16 @@ from pydantic import BaseModel, TypeAdapter
 from dealsieve.ingestion.email import parse_eml
 from dealsieve.ingestion.text import from_text
 from dealsieve.notifications import Notifier, get_notifier
+from dealsieve.outbound import Outbox, get_outbox
 from dealsieve.persistence import Repo
 from dealsieve.pipeline import process_inbound
 from dealsieve.policy import InvestmentPolicy, load_policy
 from dealsieve.schemas import (
     Actor,
     Channel,
+    DiligenceRequest,
     EventType,
+    InboundMessage,
     Notification,
     Opportunity,
     OpportunityEvent,
@@ -62,6 +66,7 @@ _PLACEHOLDER_HTML = """<!doctype html>
 _watchlist_adapter: TypeAdapter[list[WatchlistItem]] = TypeAdapter(list[WatchlistItem])
 _notification_adapter: TypeAdapter[list[Notification]] = TypeAdapter(list[Notification])
 _draft_adapter: TypeAdapter[list[OutboundDraft]] = TypeAdapter(list[OutboundDraft])
+_diligence_adapter: TypeAdapter[list[DiligenceRequest]] = TypeAdapter(list[DiligenceRequest])
 
 
 def _json(model: BaseModel, *, status_code: int = 200) -> Response:
@@ -122,11 +127,16 @@ class IngestTextBody(BaseModel):
     channel: Literal["telegram", "manual"] = "manual"
 
 
+class FollowUpTickBody(BaseModel):
+    as_of: str | None = None
+
+
 def create_app(
     *,
     repo: Repo | None = None,
     policy: InvestmentPolicy | None = None,
     notifier: Notifier | None = None,
+    outbox: Outbox | None = None,
 ) -> FastAPI:
     app = FastAPI(title="DealSieve", version="0.1.0")
 
@@ -142,6 +152,7 @@ def create_app(
     app.state.repo = repo
     app.state.policy = policy
     app.state.notifier = notifier
+    app.state.outbox = outbox
 
     def get_repo(request: Request) -> Repo:
         if request.app.state.repo is None:
@@ -157,6 +168,11 @@ def create_app(
         if request.app.state.notifier is None:
             request.app.state.notifier = get_notifier()
         return request.app.state.notifier
+
+    def get_outbox_dep(request: Request, policy: InvestmentPolicy = Depends(get_policy)) -> Outbox:  # noqa: B008
+        if request.app.state.outbox is None:
+            request.app.state.outbox = get_outbox(policy)
+        return request.app.state.outbox
 
     # ----------------------------------------------------------------------------------- health / stats
 
@@ -219,9 +235,20 @@ def create_app(
         return updated
 
     @app.post("/api/drafts/{draft_id}/approve")
-    def approve_draft(draft_id: str, repo: Repo = Depends(get_repo)) -> Response:  # noqa: B008
-        # Approval only records HUMAN_APPROVED_DRAFT. Nothing is ever sent from here.
-        return _json(_decide_draft(draft_id, approve=True, repo=repo))
+    def approve_draft(
+        draft_id: str,
+        repo: Repo = Depends(get_repo),  # noqa: B008
+        policy: InvestmentPolicy = Depends(get_policy),  # noqa: B008
+        outbox: Outbox = Depends(get_outbox_dep),  # noqa: B008
+    ) -> Response:
+        from dealsieve.diligence import approve_and_send
+
+        try:
+            return _json(approve_and_send(draft_id, repo=repo, policy=policy, outbox=outbox))
+        except LookupError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
 
     @app.post("/api/drafts/{draft_id}/reject")
     def reject_draft(draft_id: str, repo: Repo = Depends(get_repo)) -> Response:  # noqa: B008
@@ -235,6 +262,69 @@ def create_app(
     ) -> Response:
         return _json_list(_notification_adapter, list(repo.list_notifications(opportunity_id=opportunity_id)))
 
+    # ----------------------------------------------------------------------------------- diligence
+
+    @app.get("/api/diligence")
+    def list_diligence(
+        status: str | None = Query(default=None), repo: Repo = Depends(get_repo)  # noqa: B008
+    ) -> Response:
+        return _json_list(_diligence_adapter, list(repo.list_diligence_requests(status=status)))
+
+    @app.post("/api/diligence/tick")
+    def tick_diligence(
+        body: FollowUpTickBody,
+        repo: Repo = Depends(get_repo),  # noqa: B008
+        policy: InvestmentPolicy = Depends(get_policy),  # noqa: B008
+        notifier: Notifier = Depends(get_notifier_dep),  # noqa: B008
+        outbox: Outbox = Depends(get_outbox_dep),  # noqa: B008
+    ) -> JSONResponse:
+        from dealsieve.diligence import run_follow_ups
+
+        as_of = None
+        if body.as_of:
+            try:
+                from datetime import datetime
+
+                as_of = datetime.fromisoformat(body.as_of.replace("Z", "+00:00"))
+            except ValueError as exc:
+                raise HTTPException(status_code=422, detail="as_of must be an ISO-8601 datetime") from exc
+        report = run_follow_ups(repo=repo, policy=policy, outbox=outbox, notifier=notifier, as_of=as_of)
+        return JSONResponse(jsonable_encoder(report.model_dump(mode="json")))
+
+    @app.get("/api/correspondence/{opportunity_id}")
+    def correspondence(opportunity_id: str, repo: Repo = Depends(get_repo)) -> JSONResponse:  # noqa: B008
+        if repo.get_opportunity(opportunity_id) is None:
+            raise HTTPException(status_code=404, detail=f"No opportunity {opportunity_id!r}")
+        inbound: list[InboundMessage] = repo.list_inbound_messages(opportunity_id)
+        outbound = repo.list_drafts(opportunity_id=opportunity_id)
+        return JSONResponse(
+            {
+                "inbound": [message.model_dump(mode="json") for message in inbound],
+                "outbound": [draft.model_dump(mode="json") for draft in outbound],
+            }
+        )
+
+    @app.get("/api/documents/{analysis_id}/images/{index}")
+    def document_image(analysis_id: str, index: int, repo: Repo = Depends(get_repo)) -> Response:  # noqa: B008
+        analysis = next(
+            (
+                item
+                for opportunity in repo.list_opportunities()
+                for item in repo.list_document_analyses(opportunity.opportunity_id)
+                if item.analysis_id == analysis_id
+            ),
+            None,
+        )
+        if analysis is None:
+            raise HTTPException(status_code=404, detail=f"No document analysis {analysis_id!r}")
+        if index < 1 or index > len(analysis.image_paths):
+            raise HTTPException(status_code=404, detail=f"No image {index} for document {analysis_id!r}")
+        image_path = Path(analysis.image_paths[index - 1])
+        if not image_path.is_file():
+            raise HTTPException(status_code=404, detail="Stored image is unavailable")
+        media_type = "image/png" if image_path.suffix.lower() == ".png" else "image/jpeg"
+        return Response(image_path.read_bytes(), media_type=media_type)
+
     # ----------------------------------------------------------------------------------- ingestion
 
     @app.post("/api/ingest/email")
@@ -243,6 +333,7 @@ def create_app(
         repo: Repo = Depends(get_repo),  # noqa: B008
         policy: InvestmentPolicy = Depends(get_policy),  # noqa: B008
         notifier: Notifier = Depends(get_notifier_dep),  # noqa: B008
+        outbox: Outbox = Depends(get_outbox_dep),  # noqa: B008
     ) -> Response:
         content_type = request.headers.get("content-type", "")
         if content_type.startswith("multipart/form-data"):
@@ -256,7 +347,7 @@ def create_app(
         if not raw:
             raise HTTPException(status_code=400, detail="empty request body")
         message = parse_eml(raw)
-        outcome = process_inbound(message, repo=repo, policy=policy, notifier=notifier)
+        outcome = process_inbound(message, repo=repo, policy=policy, notifier=notifier, outbox=outbox)
         return _json(outcome)
 
     @app.post("/api/ingest/text")
@@ -265,9 +356,10 @@ def create_app(
         repo: Repo = Depends(get_repo),  # noqa: B008
         policy: InvestmentPolicy = Depends(get_policy),  # noqa: B008
         notifier: Notifier = Depends(get_notifier_dep),  # noqa: B008
+        outbox: Outbox = Depends(get_outbox_dep),  # noqa: B008
     ) -> Response:
         message = from_text(body.text, channel=Channel(body.channel), sender=body.sender)
-        outcome = process_inbound(message, repo=repo, policy=policy, notifier=notifier)
+        outcome = process_inbound(message, repo=repo, policy=policy, notifier=notifier, outbox=outbox)
         return _json(outcome)
 
     # ----------------------------------------------------------------------------------- static / SPA

@@ -203,6 +203,84 @@ def test_resolve_exact_beats_fuzzy_when_both_available(repo):
     assert result.confidence == 1.0  # exact tier wins even though fuzzy would also match
 
 
+def test_r8_conflicting_exact_identifiers_require_human_review(repo):
+    prop_a, opp_a = _seed_property_and_opportunity(repo, address="1234 Power Inn Road")
+    _, opp_b = _seed_property_and_opportunity(repo, address="9000 Elder Creek Road", apn="APN-B")
+
+    result = resolve(
+        IdentityKeys(normalized_address=prop_a.normalized_address, apn="APN-B"),
+        repo,
+    )
+
+    assert result.opportunity_id is None
+    assert result.needs_human is True
+    assert {c["opportunity_id"] for c in result.ambiguous_candidates} == {
+        opp_a.opportunity_id,
+        opp_b.opportunity_id,
+    }
+
+
+def test_r8_explicit_identifier_can_contradict_thread_match(repo):
+    _, thread_opp = _seed_property_and_opportunity(repo, address="1234 Power Inn Road")
+    explicit_prop, explicit_opp = _seed_property_and_opportunity(
+        repo, address="9000 Elder Creek Road"
+    )
+    message = InboundMessage(
+        message_id="thread-root",
+        channel=Channel.EMAIL,
+        body_text="first deal",
+        thread_id="thread-root",
+    )
+    repo.store_inbound_message(message)
+    repo.link_message_to_opportunity(message.message_id, thread_opp.opportunity_id)
+
+    result = resolve(
+        IdentityKeys(thread_id="thread-root", normalized_address=explicit_prop.normalized_address),
+        repo,
+    )
+
+    assert result.opportunity_id is None
+    assert result.needs_human is True
+    assert {c["opportunity_id"] for c in result.ambiguous_candidates} == {
+        thread_opp.opportunity_id,
+        explicit_opp.opportunity_id,
+    }
+
+
+def test_r8_agreeing_thread_and_exact_identifier_return_one_candidate(repo):
+    prop, opp = _seed_property_and_opportunity(repo)
+    message = InboundMessage(
+        message_id="thread-root",
+        channel=Channel.EMAIL,
+        body_text="first deal",
+        thread_id="thread-root",
+    )
+    repo.store_inbound_message(message)
+    repo.link_message_to_opportunity(message.message_id, opp.opportunity_id)
+
+    result = resolve(
+        IdentityKeys(thread_id="thread-root", normalized_address=prop.normalized_address),
+        repo,
+    )
+
+    assert result.opportunity_id == opp.opportunity_id
+    assert result.confidence == 1.0
+    assert set(result.matched_on) == {"normalized_address", "thread"}
+    assert result.needs_human is False
+
+
+def test_r8_fuzzy_score_between_80_and_90_is_a_human_candidate(repo):
+    _, opp = _seed_property_and_opportunity(repo)
+    query = normalize_address("1234 Industrial Park Road", "Sacramento", "CA", "95826")
+
+    result = resolve(IdentityKeys(normalized_address=query, city="Sacramento"), repo)
+
+    assert result.opportunity_id is None
+    assert 0.8 <= result.confidence < 0.9
+    assert result.needs_human is True
+    assert result.ambiguous_candidates[0]["opportunity_id"] == opp.opportunity_id
+
+
 def test_resolve_evidence_field_matches_by_name_not_used_directly(repo):
     """Sanity check that resolve() only consults repo lookups, not claims.evidence directly."""
     prop, opp = _seed_property_and_opportunity(repo)

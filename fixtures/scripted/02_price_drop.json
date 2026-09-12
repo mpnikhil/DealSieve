@@ -1,5 +1,5 @@
 {
-  "_comment": "Scripted acquisition-agent turns for fixtures/emails/02_price_drop.eml: the price drop that crosses WATCH -> REVIEW. structured_outputs.SkepticOutput answers the skeptic agent's structured-output request (Strands names that tool after the Pydantic model).",
+  "_comment": "Scripted acquisition-agent turns for fixtures/emails/02_price_drop.eml: the price drop that crosses WATCH -> REVIEW. The three chased items are exactly the skeptic concerns below whose evidence_status is \"missing\"; the lease-rollover concern is \"weak\", so it is deliberately NOT chased. structured_outputs.SkepticOutput answers the skeptic agent's structured-output request (Strands names that tool after the Pydantic model).",
   "turns": [
     {
       "tool_calls": [
@@ -29,12 +29,24 @@
     {
       "tool_calls": [
         {
-          "name": "draft_broker_questions",
+          "name": "request_diligence",
           "input": {
-            "questions": [
-              "How old is the roof, and what is the replacement and repair history on it?",
-              "Is there a Phase I environmental site assessment for the property, and may we see it?",
-              "Can you provide the CAM reconciliation for the trailing twelve months?"
+            "items": [
+              {
+                "topic": "Roof age",
+                "question": "How old is the roof, and what is the replacement and repair history on it?",
+                "category": "document"
+              },
+              {
+                "topic": "Phase I environmental",
+                "question": "Is there a Phase I environmental site assessment for the property, and may we see it?",
+                "category": "document"
+              },
+              {
+                "topic": "CAM reconciliation",
+                "question": "Can you provide the CAM reconciliation for the trailing twelve months?",
+                "category": "document"
+              }
             ]
           }
         }
@@ -51,7 +63,7 @@
       ]
     },
     {
-      "final_text": "Price dropped $1,550,000 -> $1,250,000; the deal now passes every gate and moved WATCH -> REVIEW. Skeptic says proceed with questions; three broker questions drafted and you have been notified."
+      "final_text": "Price dropped $1,550,000 -> $1,250,000; the deal now passes every gate and moved WATCH -> REVIEW. Skeptic says proceed with questions; three diligence requests (roof age, Phase I, CAM reconciliation) are raised for the broker and you have been notified."
     }
   ],
   "structured_outputs": {

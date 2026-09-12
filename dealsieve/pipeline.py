@@ -1,32 +1,37 @@
-"""The one entry point every channel calls. Owned by W3.
+"""The one entry point every channel calls. Owned by W3/W12.
 
-process_inbound(message, ...) -> ProcessingOutcome
+`process_inbound(message, *, repo, policy, notifier, outbox=None, script=None) -> ProcessingOutcome`
 
-Behaviour contract:
-1. Dedupe: if repo.message_exists(message.message_id) return an outcome with summary "duplicate".
-2. Store message. Build a ProcessingSession(repo, policy, notifier, message, model).
-3. Run the Strands Acquisition Agent (dealsieve.agents.acquisition) with the message as the prompt.
-   The agent extracts claims and calls tools; tools do all deterministic work and append events.
-4. Safety net (actor=SYSTEM): after the agent returns, if claims were recorded but no underwriting ran,
-   run it; if the run crossed into REVIEW and no human notification was sent, send it. The demo must not
-   depend on the model remembering a step.
-5. Return ProcessingOutcome. Never raise on model failure: record a NOTE event and return summary.
+1. **Claim the message (R4).** `repo.claim_message` atomically inserts it, or re-claims a row left
+   `failed`/`processing` by an earlier crash. It returns False only for messages that actually
+   *completed*, and only those get the duplicate outcome. Message existence is not completion: a
+   crash halfway through used to mark a deal permanently processed with no underwriting run.
+2. Build a `ProcessingSession` and run the Strands acquisition agent over the rendered message. The
+   agent extracts claims and calls tools; the tools do every deterministic thing and append events.
+3. **Safety net (actor=SYSTEM).** Whatever the model forgot, do here: underwrite after any document
+   analysis, run the skeptic and raise the diligence requests on a crossing, draft the credit
+   request on a loss, interrupt the human on either. The demo must never depend on a model
+   remembering a procedure.
+4. **Isolation (R6).** Every safety-net action is wrapped independently. A failing skeptic must not
+   cost the human their notification. Failures become NOTE events and text in the summary.
+5. Mark the message completed or failed, and return the outcome. `process_inbound` never raises.
 """
 
 from __future__ import annotations
 
 import logging
-from typing import Any
+from collections.abc import Callable
+from typing import TYPE_CHECKING, Any
 
 from dealsieve.agents.acquisition import build_acquisition_agent, render_message_prompt
 from dealsieve.agents.tools import (
-    MAX_BROKER_QUESTIONS,
     ProcessingSession,
-    perform_draft_broker_questions,
+    diligence_items_from,
     perform_notify_human,
+    perform_request_diligence,
+    perform_request_price_adjustment,
     perform_skeptic_review,
     perform_underwrite,
-    suggested_questions,
 )
 from dealsieve.models import backend_name
 from dealsieve.notifications import Notifier
@@ -39,6 +44,9 @@ from dealsieve.schemas import (
     ProcessingOutcome,
 )
 
+if TYPE_CHECKING:  # pragma: no cover - typing only
+    from dealsieve.outbound import Outbox
+
 logger = logging.getLogger(__name__)
 
 
@@ -47,6 +55,45 @@ def _agent_text(result: Any) -> str:
     message = getattr(result, "message", None) or {}
     parts = [block["text"].strip() for block in message.get("content", []) if block.get("text")]
     return " ".join(part for part in parts if part).strip()
+
+
+def _resolve_outbox(outbox: Outbox | None) -> Outbox | None:
+    """The caller's outbox, else the one the environment configures."""
+    if outbox is not None:
+        return outbox
+    try:
+        from dealsieve.outbound import get_outbox
+    except ImportError:  # pragma: no cover - only before the outbound package lands
+        logger.warning("dealsieve.outbound is unavailable; broker mail cannot be sent")
+        return None
+    return get_outbox()
+
+
+def _claim(repo: Repo, message: InboundMessage) -> bool:
+    """R4. False only when this message already completed."""
+    claim = getattr(repo, "claim_message", None)
+    if claim is not None:
+        return bool(claim(message))
+    # Pre-R4 repositories have no processing state: fall back to plain existence.
+    if repo.message_exists(message.message_id):
+        return False
+    repo.store_inbound_message(message)
+    return True
+
+
+def _finish(repo: Repo, message_id: str, *, error: str | None) -> None:
+    """Mark the message completed or failed. Never let bookkeeping take the pipeline down."""
+    try:
+        if error is None:
+            mark = getattr(repo, "mark_message_completed", None)
+            if mark is not None:
+                mark(message_id)
+        else:
+            mark_failed = getattr(repo, "mark_message_failed", None)
+            if mark_failed is not None:
+                mark_failed(message_id, error)
+    except Exception:  # pragma: no cover - defensive
+        logger.exception("could not record the processing state of %s", message_id)
 
 
 def _duplicate_outcome(message: InboundMessage, repo: Repo, backend: str) -> ProcessingOutcome:
@@ -66,43 +113,102 @@ def _duplicate_outcome(message: InboundMessage, repo: Repo, backend: str) -> Pro
     )
 
 
+# --------------------------------------------------------------------------- safety net
+
+
+def _isolated(session: ProcessingSession, label: str, call: Callable[[], dict[str, Any]]) -> dict[str, Any]:
+    """R6: run one safety-net action so that its failure costs only that action.
+
+    A skeptic agent that times out must not stop the human being told the deal became investable.
+    The failure is recorded twice -- as a NOTE event on the opportunity, and in the outcome summary --
+    so it is visible in the deal's history and to whoever called the pipeline.
+    """
+    try:
+        return call()
+    except Exception as exc:
+        error = f"safety-net {label} failed: {type(exc).__name__}: {exc}"
+        logger.exception("safety net: %s failed for %s", label, session.message.message_id)
+        session.errors.append(error)
+        if session.opportunity_id is not None:
+            try:
+                session.append_event(
+                    EventType.NOTE, error, {"step": label, "error": error}, actor=Actor.SYSTEM
+                )
+            except Exception:  # pragma: no cover - repo failure during error handling
+                logger.exception("could not record the safety-net failure as an event")
+        return {"error": error}
+
+
 def _safety_net(session: ProcessingSession) -> list[str]:
     """Do, as the SYSTEM actor, whatever the model forgot. The demo cannot depend on a model."""
     actions: list[str] = []
 
+    # 1. Underwrite. Also covers "a document was analyzed but never re-underwritten", which is the
+    #    step that turns $90k of roof work into a status change.
     if session.claims_recorded and session.run_after is None:
-        result = perform_underwrite(session, actor=Actor.SYSTEM)
+        result = _isolated(session, "underwriting", lambda: perform_underwrite(session, actor=Actor.SYSTEM))
         if "error" in result:
-            session.errors.append(f"safety-net underwriting failed: {result['error']}")
+            session.errors.append(f"safety-net underwriting did not run: {result['error']}")
         else:
             actions.append(f"underwriting run by safety net ({result['status']})")
 
+    # 2. A crossing owes the human a skeptic review and the diligence chase.
     if session.threshold_crossed and session.skeptic_report is None:
-        result = perform_skeptic_review(session, actor=Actor.SYSTEM)
+        result = _isolated(
+            session, "skeptic review", lambda: perform_skeptic_review(session, actor=Actor.SYSTEM)
+        )
         if "skipped" in result:
             session.errors.append(f"safety-net skeptic skipped: {result['skipped']}")
-        else:
+        elif "error" not in result:
             actions.append("skeptic review run by safety net")
 
-    if session.threshold_crossed and session.draft is None:
-        questions = suggested_questions(session.skeptic_report)[:MAX_BROKER_QUESTIONS]
-        if questions:
-            result = perform_draft_broker_questions(session, questions, actor=Actor.SYSTEM)
-            if "skipped" not in result:
-                actions.append("broker questions drafted by safety net")
+    if session.threshold_crossed and not session.diligence_requests:
+        items = diligence_items_from(session.skeptic_report)
+        if items:
+            result = _isolated(
+                session,
+                "diligence request",
+                lambda: perform_request_diligence(session, items, actor=Actor.SYSTEM),
+            )
+            if "skipped" not in result and "error" not in result:
+                actions.append(f"{len(result['request_ids'])} diligence request(s) raised by safety net")
 
-    if session.threshold_crossed and session.notification is None:
-        result = perform_notify_human(
+    # 3. A loss with a frontier owes the human the credit that would fix it.
+    if session.credit_draft is None and session.run_after is not None and session.threshold_lost:
+        if session.run_after.viability.max_viable_price is not None:
+            result = _isolated(
+                session,
+                "credit request",
+                lambda: perform_request_price_adjustment(
+                    session,
+                    None,
+                    "Diligence established immediate capital work; this is the credit that restores the deal.",
+                    actor=Actor.SYSTEM,
+                ),
+            )
+            if "skipped" not in result and "error" not in result:
+                actions.append(f"credit request drafted by safety net (${result['amount']})")
+
+    # 4. Either kind of decision change owes the human one interruption.
+    if (session.threshold_crossed or session.threshold_lost) and session.notification is None:
+        result = _isolated(
             session,
-            "Crossed into REVIEW; notified by the pipeline safety net.",
-            actor=Actor.SYSTEM,
+            "notification",
+            lambda: perform_notify_human(
+                session,
+                "Decision changed; notified by the pipeline safety net.",
+                actor=Actor.SYSTEM,
+            ),
         )
         if "skipped" in result:
             session.errors.append(f"safety-net notification skipped: {result['skipped']}")
-        else:
+        elif "error" not in result:
             actions.append("human notified by safety net")
 
     return actions
+
+
+# --------------------------------------------------------------------------- entry point
 
 
 def process_inbound(
@@ -111,15 +217,18 @@ def process_inbound(
     repo: Repo,
     policy: InvestmentPolicy,
     notifier: Notifier,
+    outbox: Outbox | None = None,
     script: str | None = None,
 ) -> ProcessingOutcome:
-    """script: path to a fixtures/scripted/*.json file when DEALSIEVE_MODEL_BACKEND=scripted."""
+    """Process one inbound message end to end. Never raises.
+
+    `outbox` defaults to `dealsieve.outbound.get_outbox()`; `script` is the path to a
+    `fixtures/scripted/*.json` file and is only meaningful when `DEALSIEVE_MODEL_BACKEND=scripted`.
+    """
     backend = backend_name()
 
-    if repo.message_exists(message.message_id):
+    if not _claim(repo, message):
         return _duplicate_outcome(message, repo, backend)
-
-    repo.store_inbound_message(message)
 
     session = ProcessingSession(
         repo=repo,
@@ -128,23 +237,25 @@ def process_inbound(
         message=message,
         model_backend=backend,
         script=script,
+        outbox=_resolve_outbox(outbox),
     )
 
     summary = ""
+    fatal: str | None = None
     try:
         agent = build_acquisition_agent(session)
         result = agent(render_message_prompt(message))
         summary = _agent_text(result)
     except Exception as exc:  # the model layer must never take the pipeline down
-        error = f"{type(exc).__name__}: {exc}"
+        fatal = f"{type(exc).__name__}: {exc}"
         logger.exception("acquisition agent failed for %s", message.message_id)
-        session.errors.append(error)
+        session.errors.append(fatal)
         if session.opportunity_id is not None:
             try:
                 session.append_event(
                     EventType.NOTE,
-                    f"Acquisition agent failed: {error}",
-                    {"error": error},
+                    f"Acquisition agent failed: {fatal}",
+                    {"error": fatal},
                     actor=Actor.SYSTEM,
                 )
             except Exception:  # pragma: no cover - repo failure during error handling
@@ -168,6 +279,10 @@ def process_inbound(
         summary = f"{summary} [errors: {'; '.join(session.errors)}]"
     if net_actions:
         summary = f"{summary} [safety net: {'; '.join(net_actions)}]"
+
+    # Completed means "dealt with; never run this again". A message that produced no underwriting
+    # run has not been dealt with -- leave it failed so a retry, or a fixed model, can pick it up.
+    _finish(repo, message.message_id, error=None if session.run_after is not None else (fatal or summary))
 
     return ProcessingOutcome(
         message_id=message.message_id,

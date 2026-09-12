@@ -312,7 +312,9 @@ def test_unknown_provider_is_rejected():
 
 
 def test_cli_env_strips_the_claude_code_markers():
-    env = cli_env({"PATH": "/bin", "CLAUDECODE": "1", "CLAUDE_CODE_ENTRYPOINT": "cli"})
+    env = cli_env(
+        "claude", {"PATH": "/bin", "CLAUDECODE": "1", "CLAUDE_CODE_ENTRYPOINT": "cli"}
+    )
     assert env == {"PATH": "/bin"}
 
 
@@ -365,7 +367,8 @@ def test_build_command_agy_passes_the_prompt_as_an_argument(tmp_path: Path):
     )
     assert command.stdin_text is None
     assert command.argv[0] == "agy"
-    assert "--dangerously-skip-permissions" in command.argv
+    assert "--sandbox" in command.argv
+    assert "--dangerously-skip-permissions" not in command.argv
     assert command.argv[command.argv.index("-p") + 1] == "PROMPT"
     assert command.argv[command.argv.index("--model") + 1] == "gemini-3.8-flash-low"
 

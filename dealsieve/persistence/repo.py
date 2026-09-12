@@ -16,8 +16,9 @@ import json
 import os
 import sqlite3
 import threading
+import time
 from collections.abc import Callable
-from datetime import timedelta
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -25,6 +26,8 @@ from dealsieve.persistence.db import connect
 from dealsieve.persistence.db import init_schema as _init_schema
 from dealsieve.schemas import (
     DashboardStats,
+    DiligenceRequest,
+    DocumentAnalysis,
     DSModel,
     EventType,
     Evidence,
@@ -44,6 +47,31 @@ from dealsieve.schemas import (
 )
 
 DEFAULT_DB_PATH = Path(os.environ.get("DEALSIEVE_DB_PATH", "data/dealsieve.db"))
+
+# R4: a "processing" row this old with no update is presumed abandoned (crashed worker, killed
+# process) and safe to re-claim.
+_STALE_PROCESSING_AFTER = timedelta(minutes=30)
+
+# R10: bounded retry for BEGIN IMMEDIATE transactions that lose a write-lock race against another
+# Repo instance/connection on the same sqlite file.
+_LOCK_RETRY_ATTEMPTS = 100
+_LOCK_RETRY_BASE_DELAY = 0.005
+_LOCK_RETRY_MAX_DELAY = 0.2
+
+
+class DuplicateNotification(RuntimeError):
+    """Raised by Repo.store_notification when a notification with the same dedupe_key already
+    exists (R3): the caller already handled this (opportunity, run, kind) once and must not
+    delivery it again."""
+
+    def __init__(self, dedupe_key: str) -> None:
+        super().__init__(f"notification with dedupe_key {dedupe_key!r} already exists")
+        self.dedupe_key = dedupe_key
+
+
+def _is_locked_error(exc: sqlite3.OperationalError) -> bool:
+    message = str(exc).lower()
+    return "locked" in message or "busy" in message
 
 _STATUS_RANK = {
     OpportunityStatus.REVIEW: 0,
@@ -98,6 +126,47 @@ class Repo:
     def init_schema(self) -> None:
         _init_schema(self._conn)
 
+    def _run_immediate[T](self, fn: Callable[[], T]) -> T:
+        """Run ``fn`` inside a ``BEGIN IMMEDIATE`` transaction, retrying with backoff on
+        ``SQLITE_BUSY``/"database is locked" (R10).
+
+        ``BEGIN IMMEDIATE`` grabs the write lock up front instead of sqlite3's default deferred
+        transaction (which only discovers a conflict when the first write executes), so a
+        read-modify-write sequence like "max(seq)+1" is safe even when a second ``Repo`` instance
+        (its own connection, sharing this ``_lock``'s protection only within *this* process) has
+        an overlapping write in flight against the same file. Call only while holding ``self._lock``.
+        """
+        conn = self._conn
+        delay = _LOCK_RETRY_BASE_DELAY
+        last_exc: sqlite3.OperationalError | None = None
+        for _ in range(_LOCK_RETRY_ATTEMPTS):
+            try:
+                conn.execute("BEGIN IMMEDIATE")
+            except sqlite3.OperationalError as exc:
+                if not _is_locked_error(exc):
+                    raise
+                last_exc = exc
+                time.sleep(delay)
+                delay = min(delay * 1.5, _LOCK_RETRY_MAX_DELAY)
+                continue
+            try:
+                result = fn()
+                conn.commit()
+            except sqlite3.OperationalError as exc:
+                conn.rollback()
+                if not _is_locked_error(exc):
+                    raise
+                last_exc = exc
+                time.sleep(delay)
+                delay = min(delay * 1.5, _LOCK_RETRY_MAX_DELAY)
+                continue
+            except Exception:
+                conn.rollback()
+                raise
+            return result
+        assert last_exc is not None
+        raise last_exc
+
     # ------------------------------------------------------------------ messages
 
     @_locked
@@ -133,6 +202,107 @@ class Repo:
             "SELECT json FROM inbound_messages WHERE message_id = ?", (message_id,)
         ).fetchone()
         return _load(InboundMessage, row["json"]) if row else None
+
+    @_locked
+    def claim_message(self, message: InboundMessage) -> bool:
+        """R4: atomically claim ``message`` for processing, storing it on first sight.
+
+        Returns True when the caller should (re)process the message:
+          - it has never been seen before (row inserted with status "processing"), or
+          - it was stored through the legacy path and is still "received", or
+          - the last attempt failed (status "failed" -> re-claimed as "processing"), or
+          - the last attempt is "processing" but stale (no update in >30 minutes: an abandoned
+            worker) -> re-claimed as "processing".
+        Returns False when the message is already "completed", or is "processing" and NOT stale
+        (someone else is actively handling it right now) -- in neither case does this call change
+        the stored row.
+        """
+
+        def _txn() -> bool:
+            conn = self._conn
+            row = conn.execute(
+                "SELECT status, updated_at FROM inbound_messages WHERE message_id = ?",
+                (message.message_id,),
+            ).fetchone()
+            now_iso = now_utc().isoformat()
+
+            if row is None:
+                conn.execute(
+                    """
+                    INSERT INTO inbound_messages
+                        (message_id, channel, received_at, sender, subject, thread_id,
+                         opportunity_id, status, error, updated_at, json)
+                    VALUES (?, ?, ?, ?, ?, ?, NULL, 'processing', NULL, ?, ?)
+                    """,
+                    (
+                        message.message_id,
+                        str(message.channel),
+                        message.received_at.isoformat(),
+                        message.sender,
+                        message.subject,
+                        message.thread_id,
+                        now_iso,
+                        _dump(message),
+                    ),
+                )
+                return True
+
+            status = row["status"]
+            if status == "completed":
+                return False
+
+            # `store_inbound_message` is still used by the record-claims path and creates a
+            # received row.  Such a row has been persisted, but has never been processed, so it
+            # must remain claimable just like a failed or abandoned attempt.
+            reclaim = status in {"received", "failed"}
+            if status == "processing":
+                stale = True
+                if row["updated_at"]:
+                    try:
+                        previous = datetime.fromisoformat(row["updated_at"])
+                        stale = (now_utc() - previous) > _STALE_PROCESSING_AFTER
+                    except ValueError:
+                        stale = True
+                reclaim = stale
+
+            if not reclaim:
+                return False
+
+            conn.execute(
+                """
+                UPDATE inbound_messages
+                   SET status = 'processing', error = NULL, updated_at = ?, json = ?
+                 WHERE message_id = ?
+                """,
+                (now_iso, _dump(message), message.message_id),
+            )
+            return True
+
+        return self._run_immediate(_txn)
+
+    @_locked
+    def mark_message_completed(self, message_id: str) -> None:
+        self._conn.execute(
+            "UPDATE inbound_messages SET status = 'completed', error = NULL, updated_at = ? WHERE message_id = ?",
+            (now_utc().isoformat(), message_id),
+        )
+        self._conn.commit()
+
+    @_locked
+    def mark_message_failed(self, message_id: str, error: str) -> None:
+        self._conn.execute(
+            "UPDATE inbound_messages SET status = 'failed', error = ?, updated_at = ? WHERE message_id = ?",
+            (error, now_utc().isoformat(), message_id),
+        )
+        self._conn.commit()
+
+    @_locked
+    def list_inbound_messages(self, opportunity_id: str) -> list[InboundMessage]:
+        rows = self._conn.execute(
+            "SELECT json FROM inbound_messages WHERE opportunity_id = ? ORDER BY received_at, rowid",
+            (opportunity_id,),
+        ).fetchall()
+        return [_load(InboundMessage, r["json"]) for r in rows]
 
     # ------------------------------------------------------------------ properties & opportunities
 
@@ -180,31 +350,39 @@ class Repo:
 
     @_locked
     def create_opportunity(self, opp: Opportunity) -> Opportunity:
-        """Assigns deal_number (sequential, starting at 101) and persists."""
-        conn = self._conn
-        row = conn.execute("SELECT MAX(deal_number) AS m FROM opportunities").fetchone()
-        next_deal_number = (row["m"] + 1) if row and row["m"] is not None else 101
-        final = opp.model_copy(update={"deal_number": next_deal_number})
-        conn.execute(
-            """
-            INSERT INTO opportunities
-                (opportunity_id, deal_number, property_id, status, broker_property_ref, listing_url,
-                 updated_at, json)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                final.opportunity_id,
-                final.deal_number,
-                final.property_id,
-                str(final.status),
-                final.broker_property_ref,
-                final.listing_url,
-                final.updated_at.isoformat(),
-                _dump(final),
-            ),
-        )
-        conn.commit()
-        return final
+        """Assigns deal_number (sequential, starting at 101) and persists.
+
+        R10: the max(deal_number)+1 read and the insert happen inside one BEGIN IMMEDIATE
+        transaction with bounded retry, so two Repo instances writing to the same sqlite file
+        concurrently never hand out the same deal_number.
+        """
+
+        def _txn() -> Opportunity:
+            conn = self._conn
+            row = conn.execute("SELECT MAX(deal_number) AS m FROM opportunities").fetchone()
+            next_deal_number = (row["m"] + 1) if row and row["m"] is not None else 101
+            final = opp.model_copy(update={"deal_number": next_deal_number})
+            conn.execute(
+                """
+                INSERT INTO opportunities
+                    (opportunity_id, deal_number, property_id, status, broker_property_ref, listing_url,
+                     updated_at, json)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    final.opportunity_id,
+                    final.deal_number,
+                    final.property_id,
+                    str(final.status),
+                    final.broker_property_ref,
+                    final.listing_url,
+                    final.updated_at.isoformat(),
+                    _dump(final),
+                ),
+            )
+            return final
+
+        return self._run_immediate(_txn)
 
     @_locked
     def get_opportunity(self, opportunity_id: str) -> Opportunity | None:
@@ -262,32 +440,39 @@ class Repo:
 
     @_locked
     def append_event(self, event: OpportunityEvent) -> OpportunityEvent:
-        """Assigns seq (per opportunity, monotonically increasing) and persists. Returns the stored event."""
-        conn = self._conn
-        row = conn.execute(
-            "SELECT MAX(seq) AS m FROM opportunity_events WHERE opportunity_id = ?",
-            (event.opportunity_id,),
-        ).fetchone()
-        next_seq = (row["m"] + 1) if row and row["m"] is not None else 1
-        final = event.model_copy(update={"seq": next_seq})
-        conn.execute(
-            """
-            INSERT INTO opportunity_events
-                (event_id, opportunity_id, seq, type, occurred_at, source_message_id, json)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                final.event_id,
-                final.opportunity_id,
-                final.seq,
-                str(final.type),
-                final.occurred_at.isoformat(),
-                final.source_message_id,
-                _dump(final),
-            ),
-        )
-        conn.commit()
-        return final
+        """Assigns seq (per opportunity, monotonically increasing) and persists. Returns the stored event.
+
+        R10: same BEGIN IMMEDIATE + bounded retry treatment as create_opportunity, for the same reason
+        -- max(seq)+1 must stay correct across concurrent Repo instances on one sqlite file.
+        """
+
+        def _txn() -> OpportunityEvent:
+            conn = self._conn
+            row = conn.execute(
+                "SELECT MAX(seq) AS m FROM opportunity_events WHERE opportunity_id = ?",
+                (event.opportunity_id,),
+            ).fetchone()
+            next_seq = (row["m"] + 1) if row and row["m"] is not None else 1
+            final = event.model_copy(update={"seq": next_seq})
+            conn.execute(
+                """
+                INSERT INTO opportunity_events
+                    (event_id, opportunity_id, seq, type, occurred_at, source_message_id, json)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    final.event_id,
+                    final.opportunity_id,
+                    final.seq,
+                    str(final.type),
+                    final.occurred_at.isoformat(),
+                    final.source_message_id,
+                    _dump(final),
+                ),
+            )
+            return final
+
+        return self._run_immediate(_txn)
 
     @_locked
     def list_events(self, opportunity_id: str) -> list[OpportunityEvent]:
@@ -450,18 +635,42 @@ class Repo:
 
     @_locked
     def store_notification(self, notification: Notification) -> None:
+        """R3: persists the notification (delivered=False, dedupe_key set) BEFORE anything is sent.
+
+        Raises DuplicateNotification if dedupe_key already exists -- the caller's cue that this
+        (opportunity, run, kind) was already handled and must be skipped, not sent twice.
+        """
+        try:
+            self._conn.execute(
+                """
+                INSERT INTO notifications (notification_id, opportunity_id, kind, created_at, dedupe_key, json)
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    notification.notification_id,
+                    notification.opportunity_id,
+                    notification.kind,
+                    notification.created_at.isoformat(),
+                    notification.dedupe_key,
+                    _dump(notification),
+                ),
+            )
+        except sqlite3.IntegrityError as exc:
+            # A failed INSERT still leaves sqlite's implicit transaction open.  Roll it back so
+            # this Repo remains usable (including for a later BEGIN IMMEDIATE transaction).
+            self._conn.rollback()
+            if "notifications.dedupe_key" in str(exc):
+                assert notification.dedupe_key is not None
+                raise DuplicateNotification(notification.dedupe_key) from exc
+            raise
+        self._conn.commit()
+
+    @_locked
+    def update_notification(self, notification: Notification) -> None:
+        """Update a stored notification in place, e.g. delivered=True after outbound.send()."""
         self._conn.execute(
-            """
-            INSERT INTO notifications (notification_id, opportunity_id, kind, created_at, json)
-            VALUES (?, ?, ?, ?, ?)
-            """,
-            (
-                notification.notification_id,
-                notification.opportunity_id,
-                notification.kind,
-                notification.created_at.isoformat(),
-                _dump(notification),
-            ),
+            "UPDATE notifications SET kind = ?, dedupe_key = ?, json = ? WHERE notification_id = ?",
+            (notification.kind, notification.dedupe_key, _dump(notification), notification.notification_id),
         )
         self._conn.commit()
 
@@ -475,6 +684,90 @@ class Repo:
                 (opportunity_id,),
             ).fetchall()
         return [_load(Notification, r["json"]) for r in rows]
+
+    # ------------------------------------------------------------------ diligence & document analyses
+
+    @_locked
+    def store_diligence_request(self, request: DiligenceRequest) -> None:
+        self._conn.execute(
+            """
+            INSERT INTO diligence_requests (request_id, opportunity_id, status, topic, created_at, json)
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (
+                request.request_id,
+                request.opportunity_id,
+                request.status,
+                request.topic,
+                request.created_at.isoformat(),
+                _dump(request),
+            ),
+        )
+        self._conn.commit()
+
+    @_locked
+    def update_diligence_request(self, request: DiligenceRequest) -> None:
+        self._conn.execute(
+            "UPDATE diligence_requests SET status = ?, topic = ?, json = ? WHERE request_id = ?",
+            (request.status, request.topic, _dump(request), request.request_id),
+        )
+        self._conn.commit()
+
+    @_locked
+    def get_diligence_request(self, request_id: str) -> DiligenceRequest | None:
+        row = self._conn.execute(
+            "SELECT json FROM diligence_requests WHERE request_id = ?", (request_id,)
+        ).fetchone()
+        return _load(DiligenceRequest, row["json"]) if row else None
+
+    @_locked
+    def list_diligence_requests(
+        self, opportunity_id: str | None = None, status: str | None = None
+    ) -> list[DiligenceRequest]:
+        query = "SELECT json FROM diligence_requests WHERE 1=1"
+        params: list[Any] = []
+        if opportunity_id is not None:
+            query += " AND opportunity_id = ?"
+            params.append(opportunity_id)
+        if status is not None:
+            query += " AND status = ?"
+            params.append(status)
+        query += " ORDER BY created_at, rowid"
+        rows = self._conn.execute(query, params).fetchall()
+        return [_load(DiligenceRequest, r["json"]) for r in rows]
+
+    @_locked
+    def open_diligence_count(self) -> int:
+        row = self._conn.execute(
+            "SELECT COUNT(*) AS c FROM diligence_requests WHERE status IN ('sent', 'overdue')"
+        ).fetchone()
+        return row["c"]
+
+    @_locked
+    def store_document_analysis(self, analysis: DocumentAnalysis) -> None:
+        self._conn.execute(
+            """
+            INSERT INTO document_analyses (analysis_id, opportunity_id, message_id, filename, created_at, json)
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (
+                analysis.analysis_id,
+                analysis.opportunity_id,
+                analysis.message_id,
+                analysis.filename,
+                analysis.created_at.isoformat(),
+                _dump(analysis),
+            ),
+        )
+        self._conn.commit()
+
+    @_locked
+    def list_document_analyses(self, opportunity_id: str) -> list[DocumentAnalysis]:
+        rows = self._conn.execute(
+            "SELECT json FROM document_analyses WHERE opportunity_id = ? ORDER BY created_at, rowid",
+            (opportunity_id,),
+        ).fetchall()
+        return [_load(DocumentAnalysis, r["json"]) for r in rows]
 
     # ------------------------------------------------------------------ read models for API/dashboard
 
@@ -526,6 +819,7 @@ class Repo:
             conditions_changed_7d=conditions_changed_7d,
             threshold_crossings_7d=threshold_crossings_7d,
             human_interruptions_7d=human_interruptions_7d,
+            open_diligence_requests=self.open_diligence_count(),
             policy_version=policy_version,
         )
 
@@ -593,6 +887,9 @@ class Repo:
             skeptic_reports=self.list_skeptic_reports(opp.opportunity_id),
             drafts=self.list_drafts(opportunity_id=opp.opportunity_id),
             notifications=self.list_notifications(opportunity_id=opp.opportunity_id),
+            diligence_requests=self.list_diligence_requests(opportunity_id=opp.opportunity_id),
+            document_analyses=self.list_document_analyses(opp.opportunity_id),
+            inbound_messages=self.list_inbound_messages(opp.opportunity_id),
         )
 
     # ------------------------------------------------------------------ identity lookups

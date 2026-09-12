@@ -18,7 +18,9 @@ export function Overview({ setPolicyVersion }: { setPolicyVersion: (v: string) =
     try {
       setTicking(true);
       const res = await tickDiligence();
-      setTickResult(`Sent ${res.sent} follow-up${res.sent !== 1 ? 's' : ''} · ${res.stalled} stalled`);
+      setTickResult(
+        `Sent ${res.follow_ups_sent} follow-up${res.follow_ups_sent !== 1 ? 's' : ''} · ${res.stalled} stalled`,
+      );
       // Refresh list
       const [s, w] = await Promise.all([fetchStats(), fetchWatchlist(includeDead)]);
       setStats(s);

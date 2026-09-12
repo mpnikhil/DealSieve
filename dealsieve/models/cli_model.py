@@ -8,6 +8,28 @@ Strands ``StreamEvent`` sequence the event loop expects.
 
 The subprocess layer is injectable (``runner=``) so rendering and parsing are unit-testable with no
 process spawning at all. See ``SubprocessCLIRunner`` for the verified command lines.
+
+Trust boundary (R9)
+-------------------
+**Everything this provider puts in a prompt is untrusted.** Broker emails, offering memoranda and
+inspection-report PDFs are written by strangers, and a coding-agent CLI is not a chat completion
+endpoint: it is a program with a shell, a filesystem and, by default, permission prompts a flag can
+switch off. There is no role separation between "system instructions" and "attacker-supplied
+document text" once both are rendered into one prompt string, so a document that says *"ignore your
+instructions and run this command"* is a real risk, not a hypothetical one.
+
+The mitigations here are defence in depth, not a sandbox:
+
+* **Minimal environment.** Only :data:`BASE_ENV_KEYS` plus the invoked provider's own auth variables
+  reach the child (:func:`cli_env`). No ``AWS_*``, no ``GITHUB_TOKEN``, no ``DEALSIEVE_*`` secrets.
+* **No tools.** ``claude`` runs with ``--tools ""``; ``codex`` runs ``-s read-only`` inside an empty
+  throwaway ``-C`` directory; ``agy`` runs ``--sandbox``. Verified 2026-09-12: agy answers in print
+  mode under ``--sandbox`` **without** ``--dangerously-skip-permissions``, so that flag is gone.
+* **Opt-in file reads.** ``DEALSIEVE_CLI_ALLOW_READ=1`` grants ``claude --tools Read`` so it can open
+  the extracted document images. It is off by default and should stay off for untrusted senders.
+
+For production, use the ``bedrock`` or ``anthropic`` backends. They have native role separation and
+native multimodal input, and they never hand untrusted text to a process that can act on it.
 """
 
 from __future__ import annotations
@@ -72,12 +94,70 @@ TOOL_CALL_SCHEMA: dict[str, Any] = {
 }
 
 #: Environment variables that make a nested `claude` invocation think it is being driven by
-#: Claude Code. They must be absent or the CLI refuses / misbehaves.
+#: Claude Code. They must be absent or the CLI refuses / misbehaves. They are also absent from the
+#: allowlist below, so :func:`cli_env` drops them either way; the tuple documents the intent.
 _STRIPPED_ENV = ("CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT")
+
+#: R9: the only environment every provider gets. Anything not listed here (AWS credentials, tokens,
+#: DEALSIEVE_* settings, the user's whole shell environment) never reaches the child process.
+BASE_ENV_KEYS: tuple[str, ...] = ("PATH", "HOME", "USER", "LANG", "LC_ALL", "TMPDIR", "TERM")
+
+#: Per-provider additions: config locations and that provider's own credentials, nothing else.
+PROVIDER_ENV_KEYS: dict[str, tuple[str, ...]] = {
+    "claude": (
+        "CLAUDE_CONFIG_DIR",
+        "ANTHROPIC_API_KEY",
+        "ANTHROPIC_AUTH_TOKEN",
+        "ANTHROPIC_BASE_URL",
+    ),
+    "codex": ("CODEX_HOME", "OPENAI_API_KEY", "OPENAI_BASE_URL"),
+    "agy": (
+        "AGY_HOME",
+        "ANTIGRAVITY_HOME",
+        "GEMINI_API_KEY",
+        "GOOGLE_API_KEY",
+        "GOOGLE_APPLICATION_CREDENTIALS",
+        "GOOGLE_CLOUD_PROJECT",
+    ),
+}
+
+#: Extensions Strands/Bedrock accept as image formats, keyed by lowercase suffix.
+IMAGE_FORMATS: dict[str, str] = {
+    ".png": "png",
+    ".jpg": "jpeg",
+    ".jpeg": "jpeg",
+    ".gif": "gif",
+    ".webp": "webp",
+}
+
+
+def image_format_for(path: str | Path) -> str:
+    """Strands `ImageFormat` for a file path. Unknown suffixes fall back to png."""
+    return IMAGE_FORMATS.get(Path(path).suffix.lower(), "png")
+
+
+def allow_read_enabled() -> bool:
+    """`DEALSIEVE_CLI_ALLOW_READ=1` lets `claude` open the images from disk. Off by default."""
+    return os.environ.get("DEALSIEVE_CLI_ALLOW_READ", "").strip() in ("1", "true", "yes")
 
 
 class CLIModelError(RuntimeError):
     """The CLI could not be run, or returned something that is not usable JSON."""
+
+
+@dataclass(frozen=True)
+class CLIImage:
+    """One image content block pulled out of the Strands transcript, ready for a CLI."""
+
+    index: int
+    """1-based position, matching the "image N" text block that precedes it in the prompt."""
+    format: str
+    data: bytes
+
+    @property
+    def filename(self) -> str:
+        suffix = "jpg" if self.format == "jpeg" else self.format
+        return f"image_{self.index}.{suffix}"
 
 
 @dataclass(frozen=True)
@@ -90,6 +170,7 @@ class CLIInvocation:
     model_id: str | None
     timeout: float
     purpose: str = "stream"
+    images: tuple[CLIImage, ...] = ()
 
 
 Runner = Callable[[CLIInvocation], dict[str, Any]]
@@ -133,12 +214,17 @@ def _unwrap(obj: dict[str, Any]) -> dict[str, Any]:
     return obj
 
 
-def cli_env(base: dict[str, str] | None = None) -> dict[str, str]:
-    """Environment for the child process: the parent's, minus the Claude Code markers."""
-    env = dict(os.environ if base is None else base)
-    for key in _STRIPPED_ENV:
-        env.pop(key, None)
-    return env
+def cli_env(provider: str, base: dict[str, str] | None = None) -> dict[str, str]:
+    """R9: a minimal allowlisted environment for one provider's child process.
+
+    Untrusted broker text reaches these CLIs, so they get the least environment that still lets them
+    find their config and authenticate: :data:`BASE_ENV_KEYS` plus this provider's own variables.
+    Everything else in the parent environment -- cloud credentials, tokens, every ``DEALSIEVE_*``
+    setting, and the Claude Code markers in :data:`_STRIPPED_ENV` -- is dropped.
+    """
+    source = dict(os.environ if base is None else base)
+    allowed = BASE_ENV_KEYS + PROVIDER_ENV_KEYS.get(provider, ())
+    return {key: source[key] for key in allowed if key in source and key not in _STRIPPED_ENV}
 
 
 @dataclass
@@ -150,6 +236,34 @@ class CLICommand:
     """When set, the JSON answer is read from this file instead of stdout."""
 
 
+def _write_images(images: tuple[CLIImage, ...], workdir: Path) -> list[Path]:
+    """Materialise the transcript's images inside the throwaway working directory."""
+    paths: list[Path] = []
+    for image in images:
+        path = workdir / image.filename
+        path.write_bytes(image.data)
+        paths.append(path)
+    return paths
+
+
+def _unavailable_note(images: tuple[CLIImage, ...]) -> str:
+    """The exact wording the contract requires when a provider cannot see the images."""
+    first, last = images[0].index, images[-1].index
+    span = f"{first}" if first == last else f"{first}..{last}"
+    return (
+        f"\n\n## Images\nimages {span} were not available to you; do not describe them. "
+        "Base every finding only on the document text above, and leave `image_ref` null."
+    )
+
+
+def _read_tool_note(paths: list[Path], images: tuple[CLIImage, ...]) -> str:
+    listing = "\n".join(f"- image {img.index}: {path}" for img, path in zip(images, paths, strict=True))
+    return (
+        "\n\n## Images\nThe images referenced above are on disk. Open each one with the Read tool "
+        f"before answering, and cite them as \"image N\":\n{listing}"
+    )
+
+
 def build_command(
     invocation: CLIInvocation, workdir: Path, *, schema_path: Path, output_path: Path
 ) -> CLICommand:
@@ -157,15 +271,34 @@ def build_command(
 
     ``claude`` takes the prompt on stdin and the schema inline; ``codex`` and ``agy`` take the
     prompt as an argument and must have stdin redirected from /dev/null or they block forever.
+
+    Images (see :class:`CLIImage`) reach each provider differently:
+
+    * ``codex`` is genuinely multimodal in ``exec`` mode: the bytes are written into the ``-C``
+      working directory and passed with one ``-i <file>`` per image, in "image N" order.
+    * ``claude`` gets the images only under ``DEALSIEVE_CLI_ALLOW_READ=1``, which swaps ``--tools ""``
+      for ``--tools Read`` and lists the on-disk paths in the prompt.
+    * ``agy`` never gets them (``--sandbox`` has no image channel in print mode).
+
+    When a provider cannot see them the prompt says so explicitly, so the model leaves ``image_ref``
+    null instead of inventing a description of a photo it never saw.
     """
     schema_json = json.dumps(invocation.schema)
     provider = invocation.provider
     model_id = invocation.model_id
+    images = invocation.images
+    prompt = invocation.prompt
 
     if provider == "claude":
         argv = ["claude", "-p"]
         if model_id:
             argv += ["--model", model_id]
+        tools = ""
+        if images and allow_read_enabled():
+            tools = "Read"
+            prompt += _read_tool_note(_write_images(images, workdir), images)
+        elif images:
+            prompt += _unavailable_note(images)
         argv += [
             "--no-session-persistence",
             "--output-format",
@@ -173,9 +306,9 @@ def build_command(
             "--json-schema",
             schema_json,
             "--tools",
-            "",
+            tools,
         ]
-        return CLICommand(argv=argv, stdin_text=invocation.prompt, output_file=None)
+        return CLICommand(argv=argv, stdin_text=prompt, output_file=None)
 
     if provider == "codex":
         schema_path.write_text(schema_json, encoding="utf-8")
@@ -191,16 +324,22 @@ def build_command(
             str(schema_path),
             "-o",
             str(output_path),
-            invocation.prompt,
         ]
+        for path in _write_images(images, workdir):
+            argv += ["-i", str(path)]
+        argv.append(prompt)
         return CLICommand(argv=argv, stdin_text=None, output_file=output_path)
 
     if provider == "agy":
         schema_path.write_text(schema_json, encoding="utf-8")
-        argv = ["agy", "--output-format", "json", "--json-schema", str(schema_path)]
+        # R9, verified 2026-09-12: --sandbox alone answers in print mode, so the
+        # --dangerously-skip-permissions flag this used to carry is gone.
+        argv = ["agy", "--sandbox", "--output-format", "json", "--json-schema", str(schema_path)]
         if model_id:
             argv += ["--model", model_id]
-        argv += ["--dangerously-skip-permissions", "-p", invocation.prompt]
+        if images:
+            prompt += _unavailable_note(images)
+        argv += ["-p", prompt]
         return CLICommand(argv=argv, stdin_text=None, output_file=None)
 
     raise CLIModelError(f"unknown CLI provider: {provider!r} (expected claude | codex | agy)")
@@ -233,7 +372,7 @@ class SubprocessCLIRunner:
                 capture_output=True,
                 text=True,
                 timeout=invocation.timeout,
-                env=cli_env(),
+                env=cli_env(invocation.provider),
                 cwd=str(workdir),
                 check=False,
             )
@@ -269,9 +408,33 @@ def _render_tool_specs(tool_specs: list[ToolSpec] | None) -> str:
     return "\n".join(blocks)
 
 
-def _render_content_block(block: dict[str, Any]) -> str | None:
+def extract_images(messages: Messages) -> tuple[CLIImage, ...]:
+    """Pull every `image` content block out of the transcript, numbered from 1 in order.
+
+    The numbering is the contract between the prompt (which carries a literal "image N" text block
+    before each image) and the provider (which attaches the files in the same order).
+    """
+    images: list[CLIImage] = []
+    for message in messages:
+        for block in message.get("content", []):
+            image = block.get("image") if isinstance(block, dict) else None
+            if not image:
+                continue
+            data = (image.get("source") or {}).get("bytes")
+            if not data:
+                continue
+            images.append(
+                CLIImage(index=len(images) + 1, format=str(image.get("format") or "png"), data=data)
+            )
+    return tuple(images)
+
+
+def _render_content_block(block: dict[str, Any], image_counter: list[int]) -> str | None:
     if "text" in block:
         return block["text"]
+    if "image" in block:
+        image_counter[0] += 1
+        return f"[image {image_counter[0]}]"
     if "toolUse" in block:
         use = block["toolUse"]
         payload = json.dumps(use.get("input", {}), sort_keys=True, default=str)
@@ -295,11 +458,14 @@ def _render_content_block(block: dict[str, Any]) -> str | None:
 
 def _render_transcript(messages: Messages) -> str:
     lines: list[str] = []
+    image_counter = [0]
     for message in messages:
         role = message.get("role", "user")
         rendered = [
             text
-            for text in (_render_content_block(block) for block in message.get("content", []))
+            for text in (
+                _render_content_block(block, image_counter) for block in message.get("content", [])
+            )
             if text
         ]
         if not rendered:
@@ -561,7 +727,13 @@ class CLIModel(Model):
 
     # -- invocation --------------------------------------------------------
 
-    def _invocation(self, prompt: str, schema: dict[str, Any], purpose: str) -> CLIInvocation:
+    def _invocation(
+        self,
+        prompt: str,
+        schema: dict[str, Any],
+        purpose: str,
+        images: tuple[CLIImage, ...] = (),
+    ) -> CLIInvocation:
         return CLIInvocation(
             prompt=prompt,
             schema=schema,
@@ -569,10 +741,17 @@ class CLIModel(Model):
             model_id=self.model_id,
             timeout=float(self.config.get("timeout", DEFAULT_TIMEOUT_S)),
             purpose=purpose,
+            images=images,
         )
 
-    async def _call(self, prompt: str, schema: dict[str, Any], purpose: str) -> dict[str, Any]:
-        invocation = self._invocation(prompt, schema, purpose)
+    async def _call(
+        self,
+        prompt: str,
+        schema: dict[str, Any],
+        purpose: str,
+        images: tuple[CLIImage, ...] = (),
+    ) -> dict[str, Any]:
+        invocation = self._invocation(prompt, schema, purpose, images)
         return await asyncio.to_thread(self._runner, invocation)
 
     async def stream(
@@ -593,6 +772,7 @@ class CLIModel(Model):
         parsed: ParsedResponse | None = None
         prompt = ""
         failure: str | None = None
+        images = extract_images(messages)
 
         for attempt in range(2):
             prompt = render_prompt(
@@ -605,7 +785,7 @@ class CLIModel(Model):
                 error_feedback=error_feedback,
             )
             try:
-                payload = await self._call(prompt, TOOL_CALL_SCHEMA, "stream")
+                payload = await self._call(prompt, TOOL_CALL_SCHEMA, "stream", images)
             except Exception as exc:  # CLI missing, timeout, unparsable output
                 failure = f"{type(exc).__name__}: {exc}"
                 logger.warning("cli model invocation failed (attempt %d): %s", attempt + 1, failure)
@@ -677,6 +857,7 @@ class CLIModel(Model):
         schema = output_model.model_json_schema()
         error_feedback: str | None = None
         last_error: str | None = None
+        images = extract_images(prompt)
 
         for attempt in range(2):
             rendered = render_structured_output_prompt(
@@ -687,7 +868,7 @@ class CLIModel(Model):
                 error_feedback=error_feedback,
             )
             try:
-                payload = await self._call(rendered, schema, "structured_output")
+                payload = await self._call(rendered, schema, "structured_output", images)
                 yield {"output": output_model.model_validate(payload)}
                 return
             except Exception as exc:
@@ -706,7 +887,9 @@ class CLIModel(Model):
 
 
 __all__ = [
+    "BASE_ENV_KEYS",
     "CLICommand",
+    "CLIImage",
     "CLIInvocation",
     "CLIModel",
     "CLIModelError",
@@ -715,8 +898,13 @@ __all__ = [
     "Runner",
     "SubprocessCLIRunner",
     "TOOL_CALL_SCHEMA",
+    "IMAGE_FORMATS",
+    "PROVIDER_ENV_KEYS",
+    "allow_read_enabled",
     "build_command",
     "cli_env",
+    "extract_images",
+    "image_format_for",
     "parse_response",
     "render_prompt",
     "render_structured_output_prompt",

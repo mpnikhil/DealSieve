@@ -6,4 +6,8 @@ format_threshold_alert(...) builds the canonical "DEAL #184 JUST BECAME INVESTAB
 """
 
 from dealsieve.notifications.base import Notifier, RecordingNotifier, get_notifier  # noqa: F401
-from dealsieve.notifications.format import format_threshold_alert  # noqa: F401
+from dealsieve.notifications.format import (  # noqa: F401
+    format_fell_below_alert,
+    format_stalled_alert,
+    format_threshold_alert,
+)

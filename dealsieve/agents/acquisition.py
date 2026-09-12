@@ -24,7 +24,9 @@ Almost nothing does. Being quiet is the normal outcome and it is a good outcome.
 - You extract facts. You never compute. Cap rate, NOI, DSCR, viability and status come only from \
 the `underwrite` tool, which runs a frozen deterministic policy engine.
 - You never decide that a deal is good. The gates decide.
-- You never send anything to a broker. Drafts wait for explicit human approval.
+- You never decide what leaves the building. Whether a broker message is sent now or waits for a \
+human tap is the outreach policy's decision, enforced in code. Anything that mentions money -- a \
+credit, a price, an offer -- always waits for a human.
 
 ## Extraction rules
 - Record only what a source actually states. If a number is not stated, leave the field null and \
@@ -51,17 +53,33 @@ from the earlier email; they are already stored.
 
 ## Procedure, in this exact order
 1. `record_claims` with everything you extracted. Always first, always exactly once.
-2. `underwrite`. Always, unless record_claims returned an error.
-3. Read the `threshold_crossed` field in the result.
-   - If it is false: stop. Reply with ONE line stating the status and that no human attention is \
-needed. Do not call any other tool.
-   - If it is true, continue:
+2. `analyze_document` once for EACH attached PDF or image, passing its exact filename. Skip this \
+for plain-text and markdown attachments: their content is already in the prompt and went into \
+`record_claims`. A document can price capital work, which changes the basis the deal is \
+underwritten on, so this always comes before underwriting.
+3. `underwrite`. Always, unless record_claims returned an error.
+4. Read `threshold_crossed` and `threshold_lost` in the result. Exactly one branch applies:
+   - `threshold_crossed` is true -- the deal just became investable:
      a. `request_skeptic_review`.
-     b. `draft_broker_questions` with the skeptic's suggested questions.
+     b. `request_diligence` with the skeptic's concerns whose `evidence_status` is exactly \
+"missing" AND that have a `question_for_broker`. One item per concern: `topic` copied from the \
+concern, `question` copied from its `question_for_broker`. Do NOT include concerns rated "weak", \
+"unverified" or "contradicted" -- those are judgements about evidence that already exists, and \
+asking the broker about them wastes the buyer's credibility. If no concern qualifies, skip \
+straight to `notify_human`.
      c. `notify_human` with one short line on why this matters now.
-     d. Reply with ONE line summarizing what happened.
-Never skip a step, never reorder, never call a tool twice. If a tool returns {"skipped": ...} or \
-{"error": ...}, do not retry it: report it in your one-line summary.
+   - `threshold_lost` is true -- diligence pushed a deal you were pursuing back out of reach:
+     a. `request_price_adjustment` with `amount` = the current asking price minus the maximum \
+viable price from the underwrite result, and a `rationale` drawn from what the document \
+established (what the work is, and the document's own cost range).
+     b. `notify_human` with one short line on what changed and why.
+   - Neither is true: stop. Reply with ONE line stating the status and that no human attention is \
+needed. Do not call any other tool.
+5. Reply with ONE line summarizing what happened.
+
+Never skip a step, never reorder, never call a tool twice (`analyze_document` is the one exception: \
+once per attached document). If a tool returns {"skipped": ...} or {"error": ...}, do not retry it: \
+report it in your one-line summary.
 """
 
 
@@ -88,9 +106,14 @@ def render_message_prompt(message: InboundMessage, *, attachment_cap: int = ATTA
     if message.attachments:
         lines += ["", f"## Attachments ({len(message.attachments)})"]
         for attachment in message.attachments:
-            lines.append(
-                f"\n### {attachment.filename} ({attachment.content_type}, {attachment.size_bytes} bytes)"
-            )
+            header = f"\n### {attachment.filename} ({attachment.content_type}, {attachment.size_bytes} bytes)"
+            if attachment.image_paths:
+                header += f"\n{len(attachment.image_paths)} embedded image(s); call analyze_document on it."
+            elif attachment.content_type == "application/pdf" or attachment.filename.lower().endswith(
+                ".pdf"
+            ):
+                header += "\nPDF; call analyze_document on it."
+            lines.append(header)
             if attachment.text:
                 text = attachment.text
                 if len(text) > attachment_cap:

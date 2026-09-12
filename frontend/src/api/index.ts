@@ -68,9 +68,11 @@ export async function fetchCorrespondence(opportunityId: string): Promise<{ inbo
   return res.json();
 }
 
-export async function tickDiligence(asOf: string | null = null): Promise<{ sent: number, stalled: number }> {
+export async function tickDiligence(
+  asOf: string | null = null,
+): Promise<{ follow_ups_sent: number; stalled: number }> {
   if (IS_MOCK) {
-    return { sent: 1, stalled: 0 };
+    return { follow_ups_sent: 1, stalled: 0 };
   }
   const res = await fetch('/api/diligence/tick', {
     method: 'POST',

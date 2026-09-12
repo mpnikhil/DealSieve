@@ -28,7 +28,6 @@ CREATE TABLE IF NOT EXISTS inbound_messages (
 
 CREATE INDEX IF NOT EXISTS idx_inbound_messages_thread_id ON inbound_messages(thread_id);
 CREATE INDEX IF NOT EXISTS idx_inbound_messages_opportunity_id ON inbound_messages(opportunity_id);
-CREATE INDEX IF NOT EXISTS idx_inbound_messages_status ON inbound_messages(status);
 
 CREATE TABLE IF NOT EXISTS properties (
     property_id         TEXT PRIMARY KEY,
@@ -131,11 +130,43 @@ CREATE TABLE IF NOT EXISTS notifications (
     opportunity_id   TEXT NOT NULL REFERENCES opportunities(opportunity_id),
     kind             TEXT NOT NULL,
     created_at       TEXT NOT NULL,
+    dedupe_key       TEXT,
     json             TEXT NOT NULL
 );
 
 CREATE INDEX IF NOT EXISTS idx_notifications_opportunity_id ON notifications(opportunity_id);
+
+CREATE TABLE IF NOT EXISTS diligence_requests (
+    request_id      TEXT PRIMARY KEY,
+    opportunity_id  TEXT NOT NULL REFERENCES opportunities(opportunity_id),
+    status          TEXT NOT NULL,
+    topic           TEXT NOT NULL,
+    created_at      TEXT NOT NULL,
+    json            TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_diligence_requests_opportunity_id ON diligence_requests(opportunity_id);
+CREATE INDEX IF NOT EXISTS idx_diligence_requests_status ON diligence_requests(status);
+
+CREATE TABLE IF NOT EXISTS document_analyses (
+    analysis_id     TEXT PRIMARY KEY,
+    opportunity_id  TEXT NOT NULL REFERENCES opportunities(opportunity_id),
+    message_id      TEXT NOT NULL,
+    filename        TEXT NOT NULL,
+    created_at      TEXT NOT NULL,
+    json            TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_document_analyses_opportunity_id ON document_analyses(opportunity_id);
 """
+
+
+def _ensure_column(conn: sqlite3.Connection, table: str, column: str, ddl: str) -> None:
+    """Add ``column`` to ``table`` if it is missing (for a pre-existing db file created before
+    this column was introduced). ``CREATE TABLE IF NOT EXISTS`` alone would not retrofit it."""
+    existing = {row[1] for row in conn.execute(f"PRAGMA table_info({table})").fetchall()}
+    if column not in existing:
+        conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {ddl}")
 
 
 def connect(db_path: str | os.PathLike[str]) -> sqlite3.Connection:
@@ -156,4 +187,15 @@ def connect(db_path: str | os.PathLike[str]) -> sqlite3.Connection:
 
 def init_schema(conn: sqlite3.Connection) -> None:
     conn.executescript(SCHEMA)
+    # Defensive migration for a db file created before status/error/updated_at/dedupe_key existed.
+    _ensure_column(conn, "inbound_messages", "status", "TEXT NOT NULL DEFAULT 'received'")
+    _ensure_column(conn, "inbound_messages", "error", "TEXT")
+    _ensure_column(conn, "inbound_messages", "updated_at", "TEXT")
+    _ensure_column(conn, "notifications", "dedupe_key", "TEXT")
+    # These indexes must be created after the column migrations.  Creating them in SCHEMA would
+    # make initialization of a pre-Phase-2 database fail before `_ensure_column` can run.
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_inbound_messages_status ON inbound_messages(status)")
+    # Nullable UNIQUE: SQLite treats every NULL as distinct, so legacy notifications without a
+    # dedupe key remain valid while any non-null key stays unique.
+    conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_notifications_dedupe_key ON notifications(dedupe_key)")
     conn.commit()

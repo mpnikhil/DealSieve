@@ -1,0 +1,59 @@
+{
+  "_comment": "Scripted Act 3 reply: preserve the existing economics, inspect the attached condition report, re-underwrite with immediate roof capex, draft a credit request, and notify the human.",
+  "turns": [
+    {
+      "tool_calls": [
+        {
+          "name": "record_claims",
+          "input_ref": "fixtures/expected/claims_05_inspection_report.json",
+          "input_arg": "claims"
+        }
+      ]
+    },
+    {
+      "tool_calls": [
+        {
+          "name": "analyze_document",
+          "input": {
+            "filename": "Power_Inn_Property_Condition_Report.pdf"
+          }
+        }
+      ]
+    },
+    {
+      "tool_calls": [
+        {
+          "name": "underwrite",
+          "input": {}
+        }
+      ]
+    },
+    {
+      "tool_calls": [
+        {
+          "name": "request_price_adjustment",
+          "input": {
+            "amount": 42000,
+            "rationale": "The property condition report establishes an original 2001 roof with ponding and an open seam, and budgets replacement within 12 to 24 months at $85,000-$95,000."
+          }
+        }
+      ]
+    },
+    {
+      "tool_calls": [
+        {
+          "name": "notify_human",
+          "input": {
+            "note": "The inspection report added $90,000 of immediate roof capex, moving the deal from REVIEW to NEAR; a credit request is waiting for approval."
+          }
+        }
+      ]
+    },
+    {
+      "final_text": "The condition report answered the roof question and added $90,000 of immediate capex. The deal moved REVIEW -> NEAR; a price-credit request is pending and you have been notified."
+    }
+  ],
+  "structured_output_refs": {
+    "DocumentAnalysisOutput": "fixtures/expected/analysis_05_inspection_report.json"
+  }
+}
