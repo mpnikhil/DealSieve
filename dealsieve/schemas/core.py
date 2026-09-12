@@ -76,6 +76,14 @@ class EventType(StrEnum):
     HUMAN_APPROVED_DRAFT = "HUMAN_APPROVED_DRAFT"
     HUMAN_REJECTED_DRAFT = "HUMAN_REJECTED_DRAFT"
     BROKER_MESSAGE_SENT = "BROKER_MESSAGE_SENT"
+    DILIGENCE_REQUESTED = "DILIGENCE_REQUESTED"
+    DILIGENCE_REQUEST_SENT = "DILIGENCE_REQUEST_SENT"
+    DILIGENCE_FOLLOW_UP_SENT = "DILIGENCE_FOLLOW_UP_SENT"
+    DILIGENCE_ANSWERED = "DILIGENCE_ANSWERED"
+    DILIGENCE_STALLED = "DILIGENCE_STALLED"
+    DOCUMENT_ANALYZED = "DOCUMENT_ANALYZED"
+    CAPEX_ADJUSTED = "CAPEX_ADJUSTED"
+    OUTBOUND_BLOCKED = "OUTBOUND_BLOCKED"
     NOTE = "NOTE"
 
 
@@ -102,6 +110,7 @@ class ModelPurpose(StrEnum):
     ACQUISITION = "acquisition"
     SKEPTIC = "skeptic"
     EXTRACTION = "extraction"
+    DOCUMENT = "document"
 
 
 # --------------------------------------------------------------------------- inbound
@@ -114,6 +123,10 @@ class Attachment(DSModel):
     size_bytes: int
     text: str | None = Field(default=None, description="Extracted text when available (PDF/TXT/MD).")
     stored_path: str | None = None
+    image_paths: list[str] = Field(
+        default_factory=list,
+        description="Paths of images extracted from the attachment (PDF pages' embedded images, or the file itself).",
+    )
 
 
 class InboundMessage(DSModel):
@@ -205,11 +218,27 @@ class ExtractedClaims(DSModel):
     notes: str | None = None
 
 
+class CapexItem(DSModel):
+    """A capital item surfaced by diligence documents. Midpoint of immediate items feeds WorkingValues.immediate_capex."""
+
+    item: str
+    low: Money
+    high: Money
+    urgency: Literal["immediate", "near_term", "deferred"]
+    source_document: str
+    location: str | None = None
+    evidence_id: str | None = None
+
+    @property
+    def midpoint(self) -> Decimal:
+        return (Decimal(self.low) + Decimal(self.high)) / 2
+
+
 class WorkingValues(DSModel):
     """Reconciled, deterministic inputs to underwriting. One working value per field, with provenance."""
 
-    asking_price: Money
-    gross_scheduled_income: Money = Field(description="Annual, at the current rent roll.")
+    asking_price: Money = Field(gt=0, description="Strictly positive; the engine fails closed otherwise.")
+    gross_scheduled_income: Money = Field(ge=0, description="Annual, at the current rent roll.")
     other_income: Money = Decimal("0")
     stated_vacancy_pct: Rate = Decimal("0")
     stated_expenses: ExpenseClaims = Field(default_factory=ExpenseClaims)
@@ -220,6 +249,11 @@ class WorkingValues(DSModel):
     occupancy_pct: Rate | None = None
     tenants: list[TenantClaim] = Field(default_factory=list)
     property_type: str | None = None
+    immediate_capex: Money = Field(
+        default=Decimal("0"),
+        description="Day-one capital work established by diligence (e.g. roof replacement). Enters the all-in basis.",
+    )
+    capex_items: list[CapexItem] = Field(default_factory=list)
     provenance: dict[str, str] = Field(default_factory=dict, description="field -> evidence_id")
     conflicts: list[str] = Field(
         default_factory=list, description="Unresolved contradictions, human-readable. Never silently dropped."
@@ -254,6 +288,8 @@ class NormalizedEconomics(DSModel):
 class FinancingResult(DSModel):
     purchase_price: Money
     closing_costs: Money
+    immediate_capex: Money = Decimal("0")
+    all_in_basis: Money | None = Field(default=None, description="purchase_price + immediate_capex; cap-rate denominator.")
     total_acquisition_cost: Money
     equity_deployed: Money
     loan_amount: Money
@@ -441,29 +477,107 @@ class NotificationAction(DSModel):
 class Notification(DSModel):
     notification_id: str = Field(default_factory=lambda: new_id("ntf"))
     opportunity_id: str
-    kind: Literal["threshold_crossed", "structural_dead", "status_update", "draft_pending"]
+    kind: Literal[
+        "threshold_crossed", "fell_below_threshold", "diligence_stalled", "structural_dead", "status_update", "draft_pending"
+    ]
     channel: Channel
     title: str
     body: str
     actions: list[NotificationAction] = Field(default_factory=list)
+    dedupe_key: str | None = Field(
+        default=None,
+        description="Unique per (opportunity, run, kind). Persisted before delivery so an alert can never be sent twice.",
+    )
     created_at: datetime = Field(default_factory=now_utc)
     delivered: bool = False
     delivery_ref: str | None = None
 
 
+OutboundKind = Literal["information_request", "follow_up", "credit_request", "offer", "other"]
+
+
 class OutboundDraft(DSModel):
-    """A broker message awaiting explicit human approval. Nothing is sent autonomously."""
+    """One outbound broker message: the correspondence record.
+
+    Information requests and follow-ups may be sent autonomously when the policy's outreach section allows it
+    (requires_approval=False, status goes straight to "sent"). Anything that discusses price, credits, offers or
+    terms always requires explicit human approval first.
+    """
 
     draft_id: str = Field(default_factory=lambda: new_id("drf"))
     opportunity_id: str
+    kind: OutboundKind = "information_request"
     to_email: str | None
     subject: str
     body: str
     questions: list[str] = Field(default_factory=list)
+    request_ids: list[str] = Field(default_factory=list, description="DiligenceRequest ids this message carries.")
+    requires_approval: bool = True
     status: Literal["pending", "approved", "rejected", "sent"] = "pending"
+    in_reply_to_message_id: str | None = None
     created_at: datetime = Field(default_factory=now_utc)
     decided_at: datetime | None = None
     sent_at: datetime | None = None
+    delivery_ref: str | None = None
+
+
+class DiligenceRequest(DSModel):
+    """A question DealSieve is chasing with the broker. The unit of the autonomous diligence loop."""
+
+    request_id: str = Field(default_factory=lambda: new_id("dil"))
+    opportunity_id: str
+    topic: str = Field(description='Short noun phrase, e.g. "Roof age", "Phase I environmental", "CAM reconciliation".')
+    question: str
+    category: Literal["document", "disclosure", "clarification"] = "document"
+    source_concern: str | None = Field(default=None, description="Skeptic concern topic that produced it, if any.")
+    status: Literal["draft", "sent", "answered", "overdue", "stalled", "withdrawn"] = "draft"
+    created_at: datetime = Field(default_factory=now_utc)
+    sent_at: datetime | None = None
+    due_at: datetime | None = None
+    last_follow_up_at: datetime | None = None
+    follow_up_count: int = 0
+    answered_at: datetime | None = None
+    answer_summary: str | None = None
+    answer_evidence_ids: list[str] = Field(default_factory=list)
+    answered_by_document: str | None = None
+
+
+class DocumentFinding(DSModel):
+    topic: str
+    value: str
+    detail: str | None = None
+    severity: Literal["info", "low", "medium", "high"] = "info"
+    confidence: float = Field(ge=0.0, le=1.0)
+    page: int | None = None
+    image_ref: str | None = Field(default=None, description="Path of the reviewed image this finding rests on.")
+
+
+class RequestAnswer(DSModel):
+    request_topic: str
+    answer: str
+    resolves: bool = Field(description="True when the document fully answers the request.")
+
+
+class DocumentAnalysis(DSModel):
+    """What the Inspector agent concluded from one document, text and images together. Immutable."""
+
+    analysis_id: str = Field(default_factory=lambda: new_id("doc"))
+    opportunity_id: str
+    message_id: str
+    filename: str
+    document_type: Literal[
+        "inspection_report", "roof_report", "phase_i", "cam_statement", "rent_roll", "lease", "offering_memorandum", "other"
+    ]
+    summary: str
+    findings: list[DocumentFinding] = Field(default_factory=list)
+    answers: list[RequestAnswer] = Field(default_factory=list)
+    capex_items: list[CapexItem] = Field(default_factory=list)
+    red_flags: list[str] = Field(default_factory=list)
+    images_reviewed: int = 0
+    image_paths: list[str] = Field(default_factory=list, description="Reviewed images, index-aligned with image_ref 'image N'.")
+    text_chars: int = 0
+    model_backend: str | None = None
+    created_at: datetime = Field(default_factory=now_utc)
 
 
 # --------------------------------------------------------------------------- outcomes & dashboard
@@ -496,6 +610,7 @@ class DashboardStats(DSModel):
     conditions_changed_7d: int
     threshold_crossings_7d: int
     human_interruptions_7d: int
+    open_diligence_requests: int = 0
     policy_version: str
 
 
@@ -522,6 +637,9 @@ class OpportunityDetail(DSModel):
     skeptic_reports: list[SkepticReport]
     drafts: list[OutboundDraft]
     notifications: list[Notification]
+    diligence_requests: list[DiligenceRequest] = Field(default_factory=list)
+    document_analyses: list[DocumentAnalysis] = Field(default_factory=list)
+    inbound_messages: list[InboundMessage] = Field(default_factory=list)
 
 
 __all__ = [
@@ -543,6 +661,12 @@ __all__ = [
     "InboundMessage",
     "ModelPurpose",
     "Money",
+    "RequestAnswer",
+    "OutboundKind",
+    "DocumentFinding",
+    "DocumentAnalysis",
+    "DiligenceRequest",
+    "CapexItem",
     "Num",
     "NormalizedEconomics",
     "Notification",

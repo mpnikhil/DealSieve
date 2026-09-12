@@ -80,6 +80,21 @@ class Classification(_Frozen):
     near_threshold_pct: Decimal
 
 
+class Outreach(_Frozen):
+    auto_send_information_requests: bool
+    follow_up_after_days: int
+    max_follow_ups: int
+    always_require_approval: tuple[str, ...]
+    from_name: str
+    from_email: str
+    signature: str
+
+
+class CapexPolicy(_Frozen):
+    count_as_immediate: tuple[str, ...]
+    use_midpoint: bool
+
+
 class InvestmentPolicy(_Frozen):
     version: int
     name: str
@@ -91,6 +106,8 @@ class InvestmentPolicy(_Frozen):
     normalization: Normalization
     stress: Stress
     classification: Classification
+    outreach: Outreach
+    capex: CapexPolicy
     policy_version: str
     """Content hash identifier, e.g. "v1-3fa9c2d1e0b7". Set by load_policy()."""
     source_path: str

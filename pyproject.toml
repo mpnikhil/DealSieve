@@ -17,6 +17,8 @@ dependencies = [
   "rapidfuzz>=3.9",
   "pypdf>=5.0",
   "python-multipart>=0.0.9",
+  "fpdf2>=2.8",
+  "pillow>=10",
 ]
 
 [project.optional-dependencies]

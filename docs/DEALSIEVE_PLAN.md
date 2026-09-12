@@ -1315,3 +1315,63 @@ It calculates:
 And it watches quietly until that happens.
 
 Only then does it ask for a human's attention.
+
+---
+
+## 36. Addendum (2026-09-12): the autonomous diligence loop
+
+Added after the first vertical slice was working. The skeptic's questions used to end as a draft a human had to
+approve and send by hand. That is exactly the grind acquisition professionals live in: chasing disclosures,
+inspection reports, roof and HVAC history, CAM reconciliations, then reading a 40-page PDF with photos when it
+finally arrives, then chasing again. DealSieve now owns that loop.
+
+### Lifecycle
+
+```text
+REVIEW crossing
+-> Skeptic names the unsupported claims
+-> DealSieve turns them into DiligenceRequests
+-> information request sent to the broker (autonomously, under policy)
+-> follow-ups on the policy cadence (3 days, max 2)
+-> broker replies with documents (inspection report PDF with photos)
+-> Inspector agent reads text AND images (multimodal)
+-> findings become evidence in the property's long-term record
+-> requests marked answered; capital items become immediate capex
+-> re-underwrite on the all-in basis (price + immediate capex)
+-> decision changed? interrupt the human; else stay quiet
+-> anything that talks money (credit request, offer) is drafted and waits for human approval
+-> follow-up budget exhausted? stop, tell the human once
+```
+
+### The autonomy boundary
+
+The principle "humans own irreversible decisions" is kept by classifying outbound messages, in code:
+
+| Outbound kind | Examples | Who sends |
+|---|---|---|
+| information_request, follow_up | "Can you share the roof age?", "Any update on the Phase I?" | DealSieve, autonomously, when `outreach.auto_send_information_requests` is true |
+| credit_request, offer | "We would need a $42,000 credit", LOIs, price talk | Drafted by DealSieve; a human approves before anything leaves |
+
+A deterministic screen (`dealsieve.diligence.classify_outbound_text`) rejects money and terms language from
+information requests. The policy file owns the cadence, the budget and the sender identity. No prompt decides.
+
+### Long-term memory
+
+Every document DealSieve reads produces an immutable `DocumentAnalysis` with per-finding provenance (page and
+photo), and its findings become `Evidence` rows on the opportunity. The property's record therefore grows with
+every reply, and the dashboard's Documents and Diligence panels show what is known, what is still being chased,
+and what each answer changed.
+
+### Demo Act 3
+
+Broker replies to the information request with a property condition report. DealSieve reads the report and the
+photos: roof original to 2001, ponding at the NE corner, blistering; replacement $85k-$95k within 12-24 months.
+Immediate capex $90k enters the all-in basis: cap 7.71%, DSCR 1.30x, LTV 75.2%. REVIEW -> NEAR, frontier
+$1,208,108 (3.4% below the $1.25M ask). The human is interrupted a second time ("the deal you were about to pursue
+just fell back, here is why, here is the credit that fixes it"), and a $42k credit request waits for approval.
+Phase I and CAM are still open; follow-ups go out at day 3 and day 6; at day 9 the loop stops and says so.
+
+### Explicitly still out of scope
+
+Negotiation autonomy (any money talk), tour scheduling, LOI generation, real SES/SMTP sending in the demo (a file
+outbox stands in; SMTP/SES adapters exist behind the same interface).

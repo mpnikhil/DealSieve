@@ -437,3 +437,282 @@ illustrations, fast. Empty and loading states for every panel. Must look finishe
 
 When done, report: files created, tests run and their result, anything you could not do, schema fields you need,
 and any dependency you installed with `uv pip install` that must be added to `pyproject.toml`.
+
+---
+---
+
+# Phase 2: the autonomous diligence loop (added 2026-09-12 evening)
+
+Read `docs/DEALSIEVE_PLAN.md` section 36 for the product story and the autonomy boundary. The executable spec is
+`tests/e2e/test_diligence_loop.py` plus the updated tail of `tests/e2e/test_watch_to_review.py`. Both fail today;
+they define done. Everything in Phase 1 above still applies (ownership rules, no commits, Decimal, tests).
+
+## What changed in the shared contracts (already done by the orchestrator)
+
+- `schemas/core.py`: `DiligenceRequest`, `DocumentAnalysis` (+ `DocumentFinding`, `RequestAnswer`), `CapexItem`,
+  `OutboundKind`; `OutboundDraft` gained `kind`, `requires_approval`, `request_ids`, `in_reply_to_message_id`,
+  `delivery_ref`; `WorkingValues` gained `immediate_capex` and `capex_items` and now requires `asking_price > 0`;
+  `FinancingResult` gained `immediate_capex` and `all_in_basis`; `Attachment.image_paths`;
+  `Notification.dedupe_key` and new kinds `fell_below_threshold`, `diligence_stalled`; new `EventType`s
+  (`DILIGENCE_*`, `DOCUMENT_ANALYZED`, `CAPEX_ADJUSTED`, `OUTBOUND_BLOCKED`); `ModelPurpose.DOCUMENT`;
+  `OpportunityDetail` gained `diligence_requests`, `document_analyses`, `inbound_messages`;
+  `DashboardStats.open_diligence_requests`.
+- `config/investment_policy.yaml` + `policy/loader.py`: `outreach` (auto_send_information_requests,
+  follow_up_after_days=3, max_follow_ups=2, always_require_approval, from_name/from_email/signature) and `capex`
+  (count_as_immediate=[immediate, near_term], use_midpoint). `fixtures/policies/no_autosend_policy.yaml` is the
+  same policy with auto-send off.
+- `pyproject.toml`: `fpdf2`, `pillow` added.
+
+## Ownership
+
+| WS | Owner | Owns (may edit) | Tests |
+|---|---|---|---|
+| W9 Finance | Codex | `dealsieve/underwriting/**` | `tests/underwriting/**` |
+| W10 Persistence, diligence engine, outbound, identity/reconcile fixes, API, notifications formats | Sonnet | `dealsieve/persistence/**`, `dealsieve/diligence/**` (new), `dealsieve/outbound/**` (new), `dealsieve/identity/**`, `dealsieve/evidence/**`, `dealsieve/ingestion/email.py`, `dealsieve/api/**`, `dealsieve/notifications/**`, `dealsieve/cli.py` | `tests/persistence/**`, `tests/identity/**`, `tests/diligence/**` (new), `tests/api/**` |
+| W11 Fixtures | Sonnet (web access) | `fixtures/photos/**`, `fixtures/om/05_*`, `fixtures/emails/05_*`, `fixtures/expected/*05*`, `fixtures/ATTRIBUTION.md`, `scripts/build_fixture_pdfs.py` | verifies by loading with the schemas |
+| W12 Agents | Opus | `dealsieve/agents/**`, `dealsieve/models/**`, `dealsieve/pipeline.py`, `fixtures/scripted/**` | `tests/agents/**` |
+| W13 Dashboard | agy | `frontend/**` | build |
+
+## Codex adversarial review findings, assigned
+
+Confirmed defects from the review of Phase 1 (`/codex:result review-mtyxed74-f9wc6a`), each must be fixed with a regression test:
+
+| # | Finding | Owner |
+|---|---|---|
+| R1 | Rates are quantized to 6 dp BEFORE gate evaluation (`normalize.py`, `financing.py`); raw cap 0.0799996 passes the 8% gate. Evaluate gates and run the bisection on full-precision Decimals; quantize only the emitted fields. Test just below each threshold by less than half the display quantum. | W9 |
+| R2 | Nonpositive price/NOI: DSCR sentinel 999 and zero LTV can produce a false REVIEW; price 0 divides by zero. Fail closed: `run_underwriting` raises `InvalidInputs` on price <= 0; DSCR sentinel only when loan == 0 AND NOI > 0; NOI <= 0 fails cap and DSCR gates. | W9 |
+| R3 | `notify_human` delivers before persisting; a storage failure after delivery makes the safety net send again. Persist the `Notification` with `dedupe_key = f"{opportunity_id}:{run_id}:{kind}"` and `delivered=False` FIRST (repo enforces UNIQUE on dedupe_key and raises `DuplicateNotification`), then deliver, then mark delivered. A duplicate key means "already handled": skip. | W12 (+ W10 for the constraint) |
+| R4 | Message existence is treated as completion. Add processing state to `inbound_messages` (`status`: received, processing, completed, failed; `error`). `repo.claim_message(message)` atomically inserts or re-claims a failed/abandoned row and returns False only for completed ones. Pipeline returns the duplicate outcome only for completed messages and marks completed/failed at the end. | W10 (repo) + W12 (pipeline) |
+| R5 | Calling `underwrite` twice clears `threshold_crossed`. Enforce a tool phase machine per message in `ProcessingSession`: `record_claims` once -> `analyze_document` any number of times -> `underwrite` once (a second call returns the first result, no new run) -> then, by outcome, `request_skeptic_review` once, `request_diligence` once, `request_price_adjustment` once -> `notify_human` once. Out-of-order or repeated calls return `{"skipped": reason}` and mutate nothing. Latches (`threshold_crossed`, `threshold_lost`) are set once and never cleared within a message. | W12 |
+| R6 | The safety net is not exception-isolated. Wrap each safety-net action independently; record failures as NOTE events and in `ProcessingOutcome.summary`; a failing skeptic must not prevent the notification. `process_inbound` never raises. | W12 |
+| R7 | Reconciled values can contradict the recorded winning evidence. Derive each reconciled field from the winning `Evidence.value` when evidence for that field exists (coerce to the field type); if the top-level claim disagrees with the winner, record a conflict and use the winner. | W10 |
+| R8 | Thread match wins before contradiction checks; conflicting exact keys resolve by insertion order at confidence 1.0. Collect candidates from ALL strong identifiers first; if they disagree (thread says A, address/APN says B) return `needs_human=True`, `opportunity_id=None`, both candidates listed; thread-only matching is accepted only when no explicit identifier contradicts it. Fuzzy scores in [80, 90) become `needs_human=True` candidates instead of silent no-match. | W10 |
+| R9 | Untrusted broker text reaches a permission-skipping coding-agent CLI. Run every CLI with a minimal environment allowlist (PATH, HOME, USER, LANG, TMPDIR, TERM, CODEX_HOME, CLAUDE_CONFIG_DIR, and provider auth vars), keep `claude --tools ""` and `codex -s read-only -C <empty tmpdir>`, and for agy use `--sandbox`; verify whether agy still answers in print mode without `--dangerously-skip-permissions` and drop the flag if it does (report the result). Document the trust boundary in the module docstring: production input should use `bedrock`/`anthropic`, which have native role separation. | W12 |
+| R10 | deal_number / event seq allocation is only safe within one Repo instance. Allocate inside `BEGIN IMMEDIATE` transactions with bounded retry on `SQLITE_BUSY`; add a test with two Repo instances on the same file. | W10 |
+
+## W9: finance on the all-in basis
+
+- `all_in_basis = price + v.immediate_capex`. `normalized_cap_rate = NOI / all_in_basis` (unchanged when capex is 0).
+- `compute_financing(noi, price, P, immediate_capex)`: `total_acquisition_cost = price + closing_costs + immediate_capex`;
+  loan and equity as before from `total_acquisition_cost`; `ltv = loan / price`; populate `FinancingResult.immediate_capex`
+  and `all_in_basis`.
+- `broker_vs_dealsieve`: when capex > 0 add rows "Immediate capex" (broker "—", DealSieve "$90,000") and
+  "All-in basis" (broker = price, DealSieve = all-in). Otherwise unchanged.
+- Viability: bisection unchanged (capex is a constant; all price-dependent gates stay monotone). `failure_summary`
+  for a NEAR/WATCH with capex: `"Fails on valuation after $90,000 immediate capex: cap 7.71% < 8.00%, DSCR 1.30x < 1.35x, LTV 75.2% > 75.0%"`.
+- R1 and R2 above. Keep every existing test passing; extend `tests/underwriting/test_engine_fixtures.py` with the
+  Act 3 case: fixture 01 working values at price $1,250,000 with `immediate_capex = 90000` must give status NEAR,
+  cap in [7.6%, 7.8%], DSCR in [1.28, 1.32], LTV in [0.75, 0.76], `max_viable_price` in [$1,190,000, $1,225,000].
+
+## W10: persistence, diligence engine, outbound, fixes, API
+
+### persistence
+New tables `diligence_requests(request_id PK, opportunity_id FK, status, topic, created_at, json)`,
+`document_analyses(analysis_id PK, opportunity_id FK, message_id, filename, created_at, json)`; `inbound_messages`
+gains `status`, `error`, `updated_at`; `notifications` gains `dedupe_key UNIQUE` (nullable). Methods:
+```
+claim_message(message: InboundMessage) -> bool      # R4; stores the message on first claim
+mark_message_completed(message_id) / mark_message_failed(message_id, error)
+list_inbound_messages(opportunity_id) -> list[InboundMessage]
+store_diligence_request / update_diligence_request / get_diligence_request
+list_diligence_requests(opportunity_id=None, status=None) -> list[DiligenceRequest]   # ordered by created_at
+store_document_analysis / list_document_analyses(opportunity_id)
+store_notification raises DuplicateNotification on a dedupe_key clash; update_notification(notification)
+open_diligence_count() -> int   (status in sent, overdue) ; dashboard_stats fills open_diligence_requests
+opportunity_detail includes diligence_requests, document_analyses, inbound_messages
+```
+R10 for sequences. R7, R8 in `evidence/reconcile.py` and `identity/resolver.py`.
+
+### ingestion/email.py
+Extract embedded images from PDF attachments with `pypdf` (`page.images`), keep those >= 200x200 px, convert to
+PNG with Pillow, store under `data/documents/<sha256>/img_<n>.png` (index from 1, page order), and set
+`Attachment.image_paths`. Image attachments (`image/*`) are stored the same way as a single image. The store root
+is `DEALSIEVE_DOCS_DIR` (default `data/documents`).
+
+### outbound/ (new package)
+```
+class OutboxError(RuntimeError)
+class Outbox(Protocol):  name: str;  def send(self, message: OutboundDraft) -> str  # delivery_ref
+class RecordingOutbox:   sent: list[OutboundDraft]; send appends and returns "recorded-N"
+class FileOutbox:        writes RFC 822 .eml (From from policy.outreach, To, Subject, In-Reply-To/References,
+                         Date, text/plain body) to DEALSIEVE_OUTBOX_DIR (default data/outbox)/<UTC ts>_<draft_id>.eml,
+                         prints one line "-> sent to <to>: <subject>"; returns the path
+class SmtpOutbox:        SMTP_HOST/PORT/USER/PASSWORD/STARTTLS env; optional
+def get_outbox() -> Outbox   # DEALSIEVE_OUTBOX = file (default) | smtp | recording
+```
+
+### diligence/ (new package): the deterministic loop
+```
+def classify_outbound_text(text: str) -> OutboundKind
+    # "offer" if it mentions LOI / letter of intent / purchase agreement / "our offer"; "credit_request" if it has a
+    # $ amount, "credit", "reduce the price", "price reduction", "would the seller accept", "we would pay", "discount",
+    # "concession", "terms"; else "information_request". Case-insensitive, word-boundary regexes. Money wins over info.
+def build_requests(opportunity_id, items: list[dict], *, source: str | None) -> list[DiligenceRequest]
+    # items: {topic, question, category?}; dedupe by normalized topic; status "draft"
+def compose_information_request(opp, requests, policy, *, in_reply_to, original_subject) -> OutboundDraft
+    # kind information_request, requires_approval = not policy.outreach.auto_send_information_requests,
+    # subject "Re: <original subject>" (no double Re:), body: greeting by broker first name, one sentence of context,
+    # numbered questions, policy signature. questions = [r.question ...], request_ids = [...]
+def compose_follow_up(opp, requests, policy, *, follow_up_number, in_reply_to) -> OutboundDraft   # kind follow_up
+def compose_credit_request(opp, amount: Decimal, rationale: str, policy, *, in_reply_to) -> OutboundDraft
+    # kind credit_request, requires_approval True always
+def dispatch(draft, *, repo, policy, outbox, actor=Actor.AGENT) -> OutboundDraft
+    # 1. screen: kind_seen = classify_outbound_text(body + questions). If draft.kind in (information_request,
+    #    follow_up) and kind_seen != information_request: store as pending with kind=kind_seen, requires_approval
+    #    True, append OUTBOUND_BLOCKED event, return. 2. If requires_approval or kind in
+    #    policy.outreach.always_require_approval: store pending, append BROKER_DRAFT_CREATED, return. 3. Else
+    #    outbox.send -> status sent, sent_at, delivery_ref; store; append DILIGENCE_REQUEST_SENT /
+    #    DILIGENCE_FOLLOW_UP_SENT / BROKER_MESSAGE_SENT; for carried requests set status sent, sent_at, due_at =
+    #    sent_at + follow_up_after_days.
+def approve_and_send(draft_id, *, repo, policy, outbox) -> OutboundDraft
+    # human approval: status approved (HUMAN_APPROVED_DRAFT, actor HUMAN) then outbox.send -> sent (BROKER_MESSAGE_SENT)
+def match_answers(requests, analysis) -> list[tuple[DiligenceRequest, RequestAnswer]]
+    # deterministic: an answer matches a request when normalized topics share a keyword family
+    # (roof; hvac/mechanical; phase i/environmental/esa; cam/reconciliation/opex; lease/rollover/estoppel;
+    # rent roll; survey/title/easement; zoning; parking/paving) or token-set overlap >= 0.5
+def apply_answers(matches, analysis, *, repo, evidence_ids_by_topic) -> list[DiligenceRequest]
+    # resolves=True -> status answered, answered_at, answer_summary, answered_by_document, answer_evidence_ids;
+    # resolves=False -> leave sent but append answer_summary "partial: ..."; append DILIGENCE_ANSWERED per request
+def immediate_capex_from(items: list[CapexItem], policy) -> Decimal
+    # sum of midpoint (or high if not use_midpoint) for items whose urgency is in policy.capex.count_as_immediate
+@dataclass class FollowUpReport: as_of, follow_ups_sent, stalled, requests_followed_up: list[DiligenceRequest], notifications: list[str]
+def run_follow_ups(*, repo, policy, outbox, notifier, as_of: datetime | None = None) -> FollowUpReport
+    # For each opportunity with requests in status sent and due_at <= as_of:
+    #   if follow_up_count < max_follow_ups: one follow-up message covering all overdue requests of that opportunity
+    #     (compose_follow_up + dispatch); each request: follow_up_count += 1, last_follow_up_at, due_at = as_of + days
+    #   else: status stalled for each, DILIGENCE_STALLED event, ONE notification kind diligence_stalled per
+    #     opportunity (dedupe_key f"{opportunity_id}:diligence_stalled:{sorted request ids joined}"), via notifier
+    # Idempotent: a second call with the same as_of changes nothing.
+```
+
+### notifications/format.py additions
+`format_fell_below_alert(opp, previous_run, new_run, analysis: DocumentAnalysis | None, credit_draft: OutboundDraft | None) -> Notification`
+kind `fell_below_threshold`, title `DEAL #N FELL BACK BELOW THRESHOLD`, body: what the document established (top
+findings by severity, e.g. "Roof: original 2001 built-up membrane, ponding, replacement $85k-$95k"), the capex added,
+before -> after lines for price basis / normalized cap / DSCR / LTV with PASS/FAIL, new status and frontier
+("Viable below $1,208,108, 3.4% under the ask"), and if a credit draft exists: "Drafted for your approval: request a
+$42,000 credit." Actions review / approve / reject.
+`format_stalled_alert(opp, requests) -> Notification` kind `diligence_stalled`: "No reply on N requests after M
+follow-ups: <topics>. The loop has stopped; your move." Actions review / ignore.
+
+### api
+```
+GET  /api/diligence?status=                       -> list[DiligenceRequest]
+POST /api/diligence/tick   {"as_of": iso | null}  -> FollowUpReport as JSON
+GET  /api/correspondence/{opportunity_id}         -> {"inbound": [InboundMessage...], "outbound": [OutboundDraft...]}
+GET  /api/documents/{analysis_id}/images/{index}  -> image bytes (index from 1) from DocumentAnalysis.image_paths
+POST /api/drafts/{id}/approve                     -> now calls diligence.approve_and_send (it sends!)
+```
+`dealsieve followup [--as-of YYYY-MM-DD]` and `dealsieve outbox` (lists sent messages) in cli.py.
+`tests/diligence/`: classify screen, compose (no double Re:, all questions present), dispatch gating (money blocked,
+auto-send on/off), match_answers families, run_follow_ups cadence + stall + idempotence, FileOutbox writes valid
+.eml; `tests/persistence/`: claim_message states, dedupe_key uniqueness, two-Repo sequence allocation (R10);
+`tests/identity/`: R8 cases; reconcile: R7 case.
+
+## W11: fixtures for Act 3
+
+1. `fixtures/photos/roof_ponding.jpg`, `roof_membrane.jpg`, `rooftop_hvac.jpg`: real photographs (not renders) of a
+   flat commercial roof with standing water, an aged/blistered single-ply or built-up membrane, and an aged rooftop
+   packaged HVAC unit. Source from Unsplash (Unsplash License) or Wikimedia Commons (CC0 / CC BY / CC BY-SA), resize
+   to <= 1600 px wide and <= 400 KB each, and record source URL, author, license per file in
+   `fixtures/ATTRIBUTION.md`. Open each image and confirm it shows what the caption will claim.
+2. `scripts/build_fixture_pdfs.py` (fpdf2 + Pillow) builds `fixtures/om/05_power_inn_property_condition_report.pdf`:
+   cover ("Property Condition Assessment, 8330 Power Inn Road, Sacramento, CA 95826; site visit 2026-06-18; prepared
+   for the owner"), executive summary, roof section with photo 1 caption "Photo 1: ponding water, NE corner, approx.
+   1/2 inch after 48 dry hours" and photo 2 caption "Photo 2: membrane blistering and open seam near suite 105 HVAC
+   curb", statement that the roof is the original built-up membrane installed 2001 with no documented replacement
+   and a recommendation to replace within 12 to 24 months, budget $85,000 to $95,000; HVAC section with photo 3, a
+   table of 8 packaged units (6 units 2014 to 2019; suites 103 and 106 are 1998 units "beyond typical service life,
+   operational at inspection; budget replacement within 3 to 5 years, $14,000 to $18,000 each"); brief electrical,
+   plumbing, paving sections (seal coat and restripe $6,000 to $8,000, 3 to 5 years); a findings table with cost
+   ranges and timeframes. The report must NOT mention Phase I / environmental or CAM.
+3. `fixtures/emails/05_inspection_report.eml`: From Maya Chen, Date 2026-09-15, Subject "Re: Off-market: ..." (same
+   as 02), `In-Reply-To` = 02's Message-ID, `References` = 01 then 02, `Message-ID: <pca-2026-0915-power-inn@brokerage.example>`,
+   body: "Attached is the property condition report the seller commissioned in June; roof and HVAC are on pages 3-6.
+   Still waiting on the Phase I and the CAM reconciliation from the property manager." plus signature, with the PDF
+   attached as `application/pdf`, filename `Power_Inn_Property_Condition_Report.pdf`, base64.
+4. `fixtures/expected/claims_05_inspection_report.json`: `ExtractedClaims` with address fields only, `is_price_change`
+   false, empty evidence, `notes` "Property condition report attached; no new economics."
+5. `fixtures/expected/analysis_05_inspection_report.json`: the golden `DocumentAnalysis` body (all fields except
+   analysis_id, opportunity_id, message_id, created_at, model_backend): document_type inspection_report; summary;
+   findings incl. roof age (page 3, image_ref "image 1"), ponding (image 1), blistering (image 2), HVAC vintages
+   (page 5, image 3), paving; `answers`: [{request_topic: "Roof age", answer: "...", resolves: true}]; `capex_items`:
+   roof $85,000-$95,000 immediate, HVAC 2 units $28,000-$36,000 deferred, paving $6,000-$8,000 deferred; red_flags:
+   ["Roof at end of service life; ponding indicates drainage deficiency"]; images_reviewed 3; image_paths [].
+   Validate by `DocumentAnalysis.model_validate({...,"analysis_id":"x","opportunity_id":"o","message_id":"m"})`.
+6. `fixtures/expected/05_inspection_report.json`: `{"status": "NEAR", "immediate_capex": 90000, "normalized_cap_rate":
+   [0.076, 0.078], "dscr": [1.28, 1.32], "max_viable_price": [1190000, 1225000]}`.
+7. Verify `parse_eml` on 05 yields a PDF attachment with text containing "2001" and 3 extracted images (after W10
+   lands; if not yet, verify text only and say so).
+
+## W12: agents
+
+- `agents/inspector.py`: `run_inspector(session, attachment, open_requests) -> DocumentAnalysis` using a Strands
+  `Agent(model=get_model(ModelPurpose.DOCUMENT), tools=[])` invoked with `structured_output_model=DocumentAnalysisOutput`
+  (Pydantic mirror of DocumentAnalysis without ids). The user message has: the open requests (topic + question), the
+  document text (<= 40k chars), and one Strands `image` content block per `attachment.image_paths` entry (format from
+  extension, bytes), each preceded by a text block "image N". Instruction: cite `image_ref` as "image N" and `page`
+  where possible; describe what is visible in each photo; never invent a number not in the text or visible.
+- `models/cli_model.py` image support: for `codex` write the image bytes to the `-C` tmpdir and pass `-i <file>` per
+  image; for `claude` and `agy` images are not passed (text-only) and the prompt says "images N..M were not available
+  to you; do not describe them", unless `DEALSIEVE_CLI_ALLOW_READ=1` in which case `claude` gets `--tools Read` and the
+  file paths. Bedrock/Anthropic providers pass images natively (no change). R9 hardening.
+- `models/scripted.py`: honour `structured_outputs.DocumentAnalysisOutput`; map `image_ref "image N"` to
+  `image_paths[N-1]` when building the DocumentAnalysis (do this in `run_inspector`, so both backends behave the same).
+- `agents/tools.py`: new tools `analyze_document(filename: str)`, `request_diligence(items: list[DiligenceItem])`
+  (DiligenceItem: topic, question, category), `request_price_adjustment(amount: Decimal | int, rationale: str)`;
+  remove `draft_broker_questions`. Behaviour:
+  - `analyze_document`: find the attachment (exact filename, else the only PDF); `run_inspector`; store analysis;
+    evidence rows from findings (`field=f"doc:{topic}"`, `source_document=filename`, `location="page N" or
+    "image N"`, confidence); `match_answers`/`apply_answers` against open requests; `immediate_capex_from` capex
+    items -> if > 0 update `working_values.immediate_capex/capex_items` and append `CAPEX_ADJUSTED` (payload from/to);
+    append `DOCUMENT_ANALYZED`. Return document_type, findings count, answered topics, still-open topics, capex total,
+    and `next_step: "call underwrite"`.
+  - `underwrite`: as before, plus `session.threshold_lost = previous == REVIEW and new != REVIEW`; the run must use
+    the updated working values (capex). R5 idempotency.
+  - `request_diligence`: only when status is REVIEW and once per message; `build_requests` from items (the agent
+    passes the skeptic's missing-evidence concerns: topic, question_for_broker); `compose_information_request` with
+    `in_reply_to=session.message.message_id` and the original subject; `dispatch`. Return request ids, whether it was
+    sent or is awaiting approval, and the outbox ref.
+  - `request_price_adjustment`: only when `session.threshold_lost` or the new status is NEAR/WATCH with a frontier,
+    once per message. Code computes `suggested = ceil((current_price - max_viable_price) / 1000) * 1000`; if the
+    model's amount differs from `suggested` by more than 25%, use `suggested` and say so in the returned dict.
+    `compose_credit_request` + `dispatch` (always pending). Return draft id and amount used.
+  - `notify_human`: reasons `threshold_crossed` (format_threshold_alert) and `fell_below_threshold`
+    (format_fell_below_alert with the latest analysis and credit draft); R3 intent-before-delivery with dedupe_key.
+- `agents/acquisition.py` system prompt: the procedure becomes: record_claims -> for each attached PDF/image:
+  analyze_document -> underwrite -> if threshold_crossed: request_skeptic_review -> request_diligence(items = skeptic
+  concerns with evidence_status "missing" that have a question_for_broker) -> notify_human; if threshold_lost:
+  request_price_adjustment(amount = current price minus max viable price, rationale from the analysis) -> notify_human;
+  otherwise stop. One-line final summary.
+- `pipeline.py`: signature `process_inbound(message, *, repo, policy, notifier, outbox=None, script=None)`; `outbox or
+  get_outbox()`; R4 claim/complete/fail; R6 isolation; safety net covers: underwrite after any analysis, skeptic +
+  diligence on a crossing, credit draft on a loss with a frontier, notification on crossing or loss.
+- `fixtures/scripted/02_price_drop.json`: record_claims -> underwrite -> request_skeptic_review -> request_diligence
+  (3 items: Roof age; Phase I environmental; CAM reconciliation) -> notify_human -> final. Skeptic structured output
+  keeps 4 concerns with the lease rollover one at evidence_status "weak" (so it is NOT chased; the rule is: chase only
+  "missing"). `fixtures/scripted/05_inspection_report.json`: record_claims(claims_05) -> analyze_document
+  ("Power_Inn_Property_Condition_Report.pdf") -> underwrite -> request_price_adjustment(42000, rationale) ->
+  notify_human -> final; `structured_outputs.DocumentAnalysisOutput` = the golden analysis from W11 (load via
+  `input_ref`-style reference `fixtures/expected/analysis_05_inspection_report.json`; extend ScriptedModel to accept
+  `structured_output_refs`).
+- Tests: phase machine (R5), isolation (R6), dedupe (R3), inspector prompt rendering with images (fake runner
+  asserting `-i` files for codex), match/capex plumbing via fakes, and one `@pytest.mark.live` test that runs
+  fixture 05 through `codex` with images and asserts `images_reviewed == 3` and a roof capex item.
+
+## W13: dashboard additions
+
+Deal detail: **Diligence** panel (table: topic, status pill draft/sent/overdue/answered/stalled, sent, due, follow-ups,
+answer summary with a link to the answering document), **Correspondence** panel (inbound and outbound in one thread
+ordered by time; each outbound shows kind badge and either "auto-sent under policy", "awaiting approval" with
+Approve/Reject buttons, "approved by <human> and sent", or "blocked by policy screen"), **Documents** panel (per
+`DocumentAnalysis`: type badge, summary, findings grouped by severity with page/image refs, capex items with urgency
+and whether they count as immediate, red flags, thumbnails from `GET /api/documents/{analysis_id}/images/{n}` with a
+lightbox), and the header's "Human attention" line shows the reason (entered review / fell below threshold / diligence
+stalled) from the latest notification. Broker-vs-DealSieve table renders the new "Immediate capex" and "All-in basis"
+rows when present. Overview: seventh stat tile "Awaiting broker" = `open_diligence_requests`. Mock data covers Act 3.
+
+## Integration order
+
+W9 and W11 are independent and fast; W10 next (everything else calls it); W12 builds against W10's interfaces; W13
+against the API shapes. The orchestrator runs `tests/e2e` at the end and owns the fixes across boundaries.

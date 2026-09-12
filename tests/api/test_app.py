@@ -101,6 +101,7 @@ def test_stats_empty_repo(client: TestClient) -> None:
         "conditions_changed_7d": 0,
         "threshold_crossings_7d": 0,
         "human_interruptions_7d": 0,
+        "open_diligence_requests": 0,
         "policy_version": body["policy_version"],
     }
 

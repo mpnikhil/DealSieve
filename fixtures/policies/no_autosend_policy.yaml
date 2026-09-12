@@ -54,7 +54,7 @@ outreach:
   # The autonomy boundary for broker correspondence. Information requests (documents, disclosures, clarifying
   # questions) and their follow-ups may be sent without a human in the loop. Anything that discusses price,
   # credits, offers or terms is drafted and waits for explicit human approval. Enforced in code, not in prompts.
-  auto_send_information_requests: true
+  auto_send_information_requests: false
   follow_up_after_days: 3
   max_follow_ups: 2
   always_require_approval:

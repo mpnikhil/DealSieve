@@ -101,7 +101,14 @@ def test_watch_then_price_drop_flips_to_review_and_interrupts_once(fixtures_dir,
     reports = repo.list_skeptic_reports(a.opportunity_id)
     assert len(reports) == 1 and reports[0].concerns, "skeptic ran once, on REVIEW entry"
     drafts = repo.list_drafts(opportunity_id=a.opportunity_id)
-    assert drafts and all(d.status == "pending" for d in drafts), "broker questions drafted, nothing sent"
+    info = [d for d in drafts if d.kind == "information_request"]
+    assert len(info) == 1, "one information request to the broker, sent autonomously under the outreach policy"
+    assert info[0].status == "sent" and info[0].requires_approval is False
+    assert all(d.requires_approval for d in drafts if d.kind in ("credit_request", "offer")), "money talk waits for a human"
+    requests = repo.list_diligence_requests(a.opportunity_id)
+    assert len(requests) >= 3 and all(r.status == "sent" for r in requests)
+    topics = " ".join(r.topic.lower() for r in requests)
+    assert "roof" in topics and "phase i" in topics and "cam" in topics
 
 
 def test_structural_failure_stays_dead_and_silent(fixtures_dir, repo, policy):
