@@ -62,3 +62,54 @@ def test_fixture_01_through_the_real_claude_cli_lands_on_watch(tmp_path, policy)
     assert evidence, "a real extraction must record provenance"
     sources = {e.source_document for e in evidence}
     assert any("Power_Inn_OM" in s for s in sources) or message.message_id in sources
+
+
+@pytest.mark.live
+def test_fixture_05_through_real_codex_with_images_reviews_photos(tmp_path, policy):
+    if shutil.which("codex") is None:
+        pytest.skip("the codex CLI is not on PATH")
+
+    import os
+
+    from dealsieve.diligence import approve_and_send
+    from dealsieve.ingestion import parse_eml
+    from dealsieve.notifications import RecordingNotifier
+    from dealsieve.outbound import RecordingOutbox
+    from dealsieve.persistence import Repo
+    from dealsieve.pipeline import process_inbound
+
+    os.environ["DEALSIEVE_MODEL_BACKEND"] = "cli"
+    os.environ["DEALSIEVE_CLI_PROVIDER"] = "codex"
+
+    repo = Repo(tmp_path / "live.db")
+    repo.init_schema()
+    notifier = RecordingNotifier()
+    outbox = RecordingOutbox()
+
+    # Pre-seed through scripted backend so deal is in REVIEW with open diligence requests
+    for stem in ("01_initial_offer", "02_price_drop"):
+        msg = parse_eml(ROOT / "fixtures" / "emails" / f"{stem}.eml")
+        process_inbound(
+            msg,
+            repo=repo,
+            policy=policy,
+            notifier=notifier,
+            outbox=outbox,
+            script=str(ROOT / "fixtures" / "scripted" / f"{stem}.json"),
+        )
+
+    opps = repo.list_opportunities()
+    opp = opps[0]
+    drafts = repo.list_drafts(opp.opportunity_id)
+    pending = next(d for d in drafts if d.status == "pending")
+    approve_and_send(pending.draft_id, repo=repo, policy=policy, outbox=outbox)
+
+    msg5 = parse_eml(ROOT / "fixtures" / "emails" / "05_inspection_report.eml")
+    outcome = process_inbound(msg5, repo=repo, policy=policy, notifier=notifier, outbox=outbox, script=None)
+
+    assert outcome.opportunity_id == opp.opportunity_id
+    analyses = repo.list_document_analyses(opp.opportunity_id)
+    assert len(analyses) == 1
+    assert analyses[0].images_reviewed == 3
+    assert any("roof" in i.item.lower() for i in analyses[0].capex_items)
+

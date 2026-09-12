@@ -23,8 +23,8 @@ Real numbers from the working system: **8330 Power Inn Road, Sacramento** (8-uni
 1. **Broker email arrives** (`fixtures/emails/01_initial_offer.eml`, OM attached) — asking $1,550,000, broker-stated NOI $126,000 (8.13% cap).
 2. **DealSieve extracts, normalizes and underwrites.** After a property-tax reset to 1.25% of price, a 5% vacancy floor, 5% management and a $0.25/sf capex reserve, normalized NOI is **$99,575** at a **6.42%** cap, DSCR **1.02x**. Status: **WATCH**. Viability solver: max viable price **$1,285,946** (17.0% below asking), binding constraint minimum normalized cap rate (DSCR binds within ~$10k of it). No human notified — this is a good, quiet outcome.
 3. **Later, the price drops** (`fixtures/emails/02_price_drop.eml`, same thread): "Seller reduced this to $1.25M." DealSieve recognizes the same opportunity via the email thread, records an `ASKING_PRICE_CHANGED` event, and re-underwrites automatically: NOI $103,325, normalized cap **8.27%**, DSCR **1.43x**, LTV 68%. Status flips **WATCH → REVIEW**.
-4. **The independent Skeptic Agent runs** (only because the deal now passes every gate) and flags what nothing in the record supports: roof age, Phase I environmental, CAM reconciliation. It drafts three broker questions and waits for human approval — nothing is ever sent automatically.
-5. **Exactly one human alert fires**, on Telegram (or the console notifier locally):
+4. **The independent Skeptic Agent runs** (only because the deal now passes every gate) and flags what nothing in the record supports: roof age, Phase I environmental, CAM reconciliation. It drafts an information request to the broker and waits for human approval — nothing is ever sent automatically.
+5. **First human alert fires**, on Telegram (or the console notifier locally):
 
 ```text
 DEAL #113 JUST BECAME INVESTABLE
@@ -43,8 +43,38 @@ Still unresolved:
 - CAM reconciliation
 - lease rollover concentration
 
-[Review] [Draft broker questions] [Ignore]
+Awaiting your approval: information request to the broker (3 questions)
+
+[Review] [Approve broker questions] [Ignore]
 ```
+
+6. **Human taps Approve.** The information request is dispatched via the outbox. The thread is now approved for diligence follow-ups.
+7. **Broker replies with Property Condition Report** (`fixtures/emails/05_inspection_report.eml`, condition report PDF attached with photos) — "Attached is the property condition report the seller commissioned in June; roof and HVAC are on pages 3-6."
+8. **Strands Inspector Agent analyzes document and photos.** It reads the report and inspects embedded photos of ponding and blistering on the 2001 built-up roof membrane. It marks the roof diligence request answered, flags the roof at the end of service life, and extracts **$90,000** of immediate capex.
+9. **DealSieve re-underwrites on the all-in basis.** Total basis rises from $1.25M to $1.34M ($1,250,000 + $90,000). Normalized cap rate drops to **7.71%**, DSCR to **1.30x**, LTV to **75.2%**. Status moves **REVIEW → NEAR** (fails valuation after capex; viable below $1,208,108).
+10. **A second human alert fires** with a pending price-credit draft ($42,000 credit requested to restore viability):
+
+```text
+DEAL #113 FELL BACK BELOW THRESHOLD
+8330 Power Inn Road, Sacramento, CA
+
+Diligence established: Roof age: Original built-up membrane installed 2001...
+Immediate capex added: $90,000
+
+Price basis      $1,250,000 -> $1,340,000
+Normalized cap   8.27% -> 7.71%   FAIL
+DSCR             1.43x -> 1.30x   FAIL
+LTV              68.00% -> 75.20% FAIL
+
+New status: NEAR
+Viable below $1,208,108, 3.4% under the ask
+
+Drafted for your approval: request a $42,000 credit.
+
+[Review] [Approve] [Reject]
+```
+
+11. **Autonomous follow-ups & stall detection.** Unanswered diligence requests (Phase I, CAM) are followed up on a policy cadence; if the broker goes dark, the loop stalls and alerts the human.
 
 (Deal numbers are sequential from #101; after the 12 seeded deals the demo property becomes #113.)
 
@@ -113,9 +143,10 @@ Full-resolution rendering: [`architecture/architecture.png`](architecture/archit
 
 ## How Strands is used
 
-- **Acquisition Agent** (`dealsieve/agents/acquisition.py`) — a Strands `Agent` with five `@tool`-decorated functions (`dealsieve/agents/tools.py`): `record_claims`, `underwrite`, `request_skeptic_review`, `draft_broker_questions`, `notify_human`. The model's only job is faithful extraction and following a fixed procedure; **every gate that decides what happens next is enforced in the Python tool body, not the prompt** — e.g. `notify_human` returns `{"skipped": "no threshold crossing"}` unless the underwriting run just flipped the status into REVIEW, and `draft_broker_questions` refuses to run without an existing skeptic report. The model cannot bypass a gate; it can only call the tool and read back what the tool decided.
+- **Acquisition Agent** (`dealsieve/agents/acquisition.py`) — a Strands `Agent` with code-gated tools (`dealsieve/agents/tools.py`): `record_claims`, `analyze_document`, `underwrite`, `request_skeptic_review`, `request_diligence`, `request_price_adjustment`, `notify_human`. The model's job is faithful extraction and following a fixed procedure; **every gate that decides what happens next is enforced in the Python tool body, not the prompt** — e.g. `notify_human` returns `{"skipped": "no threshold crossing"}` unless the underwriting run just flipped status, and `request_price_adjustment` calculates the exact mathematical credit needed from the viability frontier. The model cannot bypass a gate; it can only call the tool and read back what the tool decided.
 - **Skeptic Agent** (`dealsieve/agents/skeptic.py`) — a second, independent Strands `Agent` with no tools, invoked via `structured_output_model=SkepticOutput` (a Pydantic model: verdict, summary, a list of concerns with severity and evidence status). It never recomputes finance; it only argues that the numbers rest on unverified claims.
-- **`CLIModel`** (`dealsieve/models/cli_model.py`) — a custom Strands `Model` provider that runs a local coding-agent CLI (`claude -p`, `codex exec`, or `agy -p`) as the LLM, so day-to-day development and the offline demo use existing CLI subscriptions instead of API keys. It renders the whole Strands request (system prompt, tool specs, transcript) into one prompt, asks the CLI for a `{tool_calls, final_text}` JSON object against a fixed schema, and replays the answer as the `StreamEvent` sequence the Strands event loop expects.
+- **Inspector Agent** (`dealsieve/agents/inspector.py`) — a third Strands `Agent` with multimodal capabilities, invoked by `analyze_document` on inspection reports and property condition assessments. It analyzes both document text and embedded photo images (ponding, membrane blistering, rooftop HVAC condition), extracts immediate/deferred capex line items, and resolves open diligence requests with evidence provenance.
+- **`CLIModel`** (`dealsieve/models/cli_model.py`) — a custom Strands `Model` provider that runs a local coding-agent CLI (`claude -p`, `codex exec`, or `agy -p`) as the LLM, so day-to-day development and the offline demo use existing CLI subscriptions instead of API keys. It renders the whole Strands request (system prompt, tool specs, transcript, images) into one prompt, asks the CLI for a `{tool_calls, final_text}` JSON object against a fixed schema, and replays the answer as the `StreamEvent` sequence the Strands event loop expects.
 - **`ScriptedModel`** (`dealsieve/models/scripted.py`) — deterministic turn-by-turn replay from `fixtures/scripted/*.json`, used by the test suite and the offline demo so the exact numbers above reproduce with zero network calls and zero variance.
 - **`BedrockModel` / `AnthropicModel`** — Strands' own providers, swapped in purely by environment variable (`DEALSIEVE_MODEL_BACKEND=bedrock|anthropic`) with no code change; see the model backend table below.
 
@@ -133,7 +164,7 @@ Full-resolution rendering: [`architecture/architecture.png`](architecture/archit
 ```bash
 make setup           # python 3.12 venv + deps (uses uv)
 cp .env.example .env
-make test            # 216 deterministic tests, no model calls (1 live test excluded by default)
+make test            # 304 deterministic tests, no model calls (2 live tests excluded by default)
 make demo-offline    # the whole story with the scripted model: seed 12 deals, broker email -> WATCH,
                      # price drop -> REVIEW + alert box. Runs in about 3 seconds.
 make frontend        # build the dashboard (needs Node 20+)
@@ -170,6 +201,8 @@ Other environment variables (`.env.example`): `DEALSIEVE_DB_PATH` (default `data
 | `dealsieve serve [--port] [--host] [--reload]` | Runs the FastAPI dashboard/API server |
 | `dealsieve telegram-bot` | Long-polls Telegram (`getUpdates`) for messages, documents, and inline-keyboard callbacks |
 | `dealsieve status [deal#]` | Prints dashboard stats, or one deal's detail |
+| `dealsieve followup [--as-of YYYY-MM-DD]` | Advances overdue diligence requests, batches follow-ups, and detects stalled loops |
+| `dealsieve outbox` | Lists all outbound messages and delivery references from the outbox |
 
 `scripts/inject_email.py <file.eml>` is equivalent to `dealsieve ingest` and prints a readable before/after summary; `scripts/seed_demo.py` and `scripts/reset_db.py` back the `seed`/`reset` subcommands.
 
@@ -208,13 +241,15 @@ agentcore launch
 
 ```text
 dealsieve/
-├── agents/            acquisition.py, skeptic.py, tools.py — Strands agents + the deterministic tools
+├── agents/            acquisition.py, skeptic.py, inspector.py, tools.py — Strands agents + deterministic tools
 ├── api/                FastAPI app (dashboard/API surface)
+├── diligence/          deterministic diligence loop: screening, follow-ups, answer matching, stall handling
 ├── evidence/           reconcile.py — claims -> WorkingValues, conflict-preserving
 ├── identity/           resolver.py — same-property resolution across messages
-├── ingestion/          email.py, text.py, telegram.py — channel adapters -> InboundMessage
+├── ingestion/          email.py, text.py, telegram.py — channel adapters with image extraction
 ├── models/             backend.py, cli_model.py, scripted.py — the swappable model layer
 ├── notifications/      console.py, telegram.py, format.py — the human interrupt
+├── outbound/           delivery backends: FileOutbox, SmtpOutbox, RecordingOutbox
 ├── persistence/        db.py, repo.py — SQLite, immutable events/runs, derived opportunity
 ├── policy/             loader.py — reads config/investment_policy.yaml, never writes it
 ├── schemas/            core.py — every Pydantic contract in the system
@@ -225,10 +260,10 @@ dealsieve/
 └── pipeline.py         process_inbound: the one entry point every channel calls
 
 config/investment_policy.yaml   the frozen investment policy
-fixtures/                       emails/, om/, expected/, scripted/ — the demo & test fixtures
+fixtures/                       emails/, om/, expected/, scripted/, photos/ — the demo & test fixtures
 frontend/                       Vite + React + TypeScript + Tailwind dashboard
-scripts/                        inject_email.py, seed_demo.py, reset_db.py
-tests/                          underwriting/, identity/, persistence/, agents/, api/, e2e/
+scripts/                        inject_email.py, seed_demo.py, reset_db.py, build_fixture_pdfs.py
+tests/                          underwriting/, identity/, persistence/, agents/, api/, diligence/, e2e/
 architecture/                   architecture.mmd, architecture.md, architecture.png
 docs/                           DEALSIEVE_PLAN.md, CONTRACTS.md, SUBMISSION.md, DEMO_SCRIPT.md
 ```
@@ -239,7 +274,7 @@ docs/                           DEALSIEVE_PLAN.md, CONTRACTS.md, SUBMISSION.md, 
 make test
 ```
 
-**216 tests pass, 1 deselected** (a `@pytest.mark.live` test that runs fixture 01 through the real `cli` backend — excluded by default via `pyproject.toml`'s `addopts`, run explicitly with `make test-live`). Coverage spans gate boundaries, amortization against a known payment table, the property-tax reset, the viability bisection solver, stress scenarios, classification, identity resolution (address fuzzing, reply-thread matching), reconciliation and conflict preservation, the `CLIModel` render/parse cycle against an injected fake runner, the scripted-model replay, tool gating (`notify_human` refuses without a real threshold crossing; `draft_broker_questions` refuses without a skeptic report), the FastAPI surface, and the full WATCH → price-drop → REVIEW path end to end (`tests/e2e/test_watch_to_review.py`).
+**304 tests pass, 2 deselected** (`@pytest.mark.live` tests that run through real CLIs — excluded by default via `pyproject.toml`'s `addopts`, run explicitly with `make test-live`). Coverage spans gate boundaries, amortization against a known payment table, the property-tax reset, the viability bisection solver, stress scenarios, classification, identity resolution (address fuzzing, reply-thread matching), reconciliation and conflict preservation, the `CLIModel` render/parse cycle against an injected fake runner, the scripted-model replay, tool gating (`notify_human` refuses without a real threshold crossing; `request_diligence` requires REVIEW status; `request_price_adjustment` enforces frontier math), the diligence loop and follow-up engine, the FastAPI surface, and the full multi-act path end to end (`tests/e2e/test_watch_to_review.py` and `tests/e2e/test_diligence_loop.py`).
 
 ## Roadmap
 
