@@ -1,0 +1,103 @@
+{
+  "address_line": "8330 Power Inn Road",
+  "city": "Sacramento",
+  "state": "CA",
+  "postal_code": "95826",
+  "property_type": "small_bay_industrial",
+  "building_sqft": 20000,
+  "asking_price": 1550000,
+  "stated_noi": 126000,
+  "stated_cap_rate": 0.0813,
+  "stated_gross_income": 180000,
+  "stated_other_income": 0,
+  "stated_vacancy_pct": 0,
+  "stated_expenses": {
+    "property_tax": 15500,
+    "insurance": 8400,
+    "repairs_maintenance": 12000,
+    "utilities": 11000,
+    "management": null,
+    "cam_other": 7100,
+    "total": 54000
+  },
+  "tenant_count": 8,
+  "occupancy_pct": 1,
+  "largest_tenant_pct": 0.19,
+  "tenants": [
+    {"name": "Capital Cabinet Works", "suite": "101", "sqft": 3200, "annual_rent": 34200, "lease_end": "2028-06-30"},
+    {"name": "Sierra Auto Trim", "suite": "102", "sqft": 2800, "annual_rent": 25200, "lease_end": "2027-12-31"},
+    {"name": "River City Glass", "suite": "103", "sqft": 2700, "annual_rent": 23400, "lease_end": "2029-03-31"},
+    {"name": "Midtown Millwork", "suite": "104", "sqft": 2600, "annual_rent": 21600, "lease_end": "2028-11-30"},
+    {"name": "Golden State Signs", "suite": "105", "sqft": 2400, "annual_rent": 20700, "lease_end": "2027-08-31"},
+    {"name": "Delta Electrical Supply", "suite": "106", "sqft": 2300, "annual_rent": 19800, "lease_end": "2029-09-30"},
+    {"name": "NorCal Packaging", "suite": "107", "sqft": 2200, "annual_rent": 18000, "lease_end": "2028-02-29"},
+    {"name": "American River HVAC", "suite": "108", "sqft": 2000, "annual_rent": 17100, "lease_end": "2027-05-31"}
+  ],
+  "is_price_change": false,
+  "evidence": [
+    {
+      "evidence_id": "ev_fixture_01_price",
+      "field": "asking_price",
+      "value": 1550000,
+      "source_document": "<om-2026-0912-power-inn@brokerage.example>",
+      "location": "email body",
+      "quote": "offering 8330 Power Inn Road, Sacramento at $1,550,000",
+      "confidence": 1.0
+    },
+    {
+      "evidence_id": "ev_fixture_01_noi",
+      "field": "stated_noi",
+      "value": 126000,
+      "source_document": "<om-2026-0912-power-inn@brokerage.example>",
+      "location": "email body",
+      "quote": "seller reports annual NOI of $126,000",
+      "confidence": 1.0
+    },
+    {
+      "evidence_id": "ev_fixture_01_identity",
+      "field": "address_line",
+      "value": "8330 Power Inn Road",
+      "source_document": "Power_Inn_OM.md",
+      "location": "OM: Offering summary",
+      "quote": "Address: 8330 Power Inn Road, Sacramento, CA 95826",
+      "confidence": 1.0
+    },
+    {
+      "evidence_id": "ev_fixture_01_area",
+      "field": "building_sqft",
+      "value": 20000,
+      "source_document": "Power_Inn_OM.md",
+      "location": "OM: Offering summary",
+      "quote": "Building area: 20,000 square feet",
+      "confidence": 1.0
+    },
+    {
+      "evidence_id": "ev_fixture_01_rent_roll",
+      "field": "tenants",
+      "value": "8 tenants totaling $180,000 annual rent",
+      "source_document": "Power_Inn_OM.md",
+      "location": "OM: Rent Roll table",
+      "quote": "Total | | 20,000 | $180,000",
+      "confidence": 1.0
+    },
+    {
+      "evidence_id": "ev_fixture_01_largest",
+      "field": "largest_tenant_pct",
+      "value": 0.19,
+      "source_document": "Power_Inn_OM.md",
+      "location": "OM: Rent Roll table",
+      "quote": "Largest tenant: 19.0% of scheduled annual rent",
+      "confidence": 1.0
+    },
+    {
+      "evidence_id": "ev_fixture_01_expenses",
+      "field": "stated_expenses",
+      "value": 54000,
+      "source_document": "Power_Inn_OM.md",
+      "location": "OM: Stated annual operating expenses",
+      "quote": "Total stated expenses: $54,000",
+      "confidence": 1.0
+    }
+  ],
+  "missing_fields": ["roof_age", "phase_i_environmental", "cam_reconciliation"]
+}

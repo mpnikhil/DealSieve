@@ -1,0 +1,7 @@
+{
+  "status": "DEAD",
+  "normalized_cap_rate": [0.068, 0.069],
+  "dscr": [1.40, 1.42],
+  "max_viable_price": null,
+  "structural_failures": ["tenant_count_min", "largest_tenant_pct_max"]
+}

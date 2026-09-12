@@ -14,8 +14,67 @@ W1 implements this module and its siblings:
 
 from __future__ import annotations
 
+from decimal import Decimal
+
 from dealsieve.policy import InvestmentPolicy
-from dealsieve.schemas import UnderwritingResult, WorkingValues
+from dealsieve.schemas import GateResult, OpportunityStatus, UnderwritingResult, WorkingValues
+from dealsieve.underwriting.classify import classify
+from dealsieve.underwriting.compare import broker_vs_dealsieve
+from dealsieve.underwriting.financing import compute_financing
+from dealsieve.underwriting.gates import evaluate_gates
+from dealsieve.underwriting.normalize import normalize_economics
+from dealsieve.underwriting.stress import run_stress
+from dealsieve.underwriting.viability import solve_max_viable_price
+
+
+def _money(value: Decimal) -> str:
+    return f"${value.quantize(Decimal('1')):,.0f}"
+
+
+def _percent(value: Decimal) -> str:
+    return f"{value * 100:.2f}%"
+
+
+def _failure_summary(
+    status: OpportunityStatus,
+    gates: list[GateResult],
+    price: Decimal,
+) -> str:
+    failed = {gate.gate: gate for gate in gates if not gate.passed}
+    if status == OpportunityStatus.DEAD:
+        parts: list[str] = []
+        largest = failed.get("largest_tenant_pct_max")
+        if largest is not None:
+            parts.append(
+                f"largest tenant {_percent(Decimal(largest.actual))} > "
+                f"{_percent(Decimal(largest.threshold))}"
+            )
+        tenants = failed.get("tenant_count_min")
+        if tenants is not None:
+            parts.append(f"{tenants.actual} tenants < {tenants.threshold}")
+        return "Structural: " + ", ".join(parts)
+    if status == OpportunityStatus.REVIEW:
+        return f"Passes all gates at {_money(price)}"
+
+    parts = []
+    cap = failed.get("min_normalized_cap_rate")
+    if cap is not None:
+        parts.append(
+            f"normalized cap {_percent(Decimal(cap.actual))} < "
+            f"{_percent(Decimal(cap.threshold))}"
+        )
+    dscr = failed.get("min_base_dscr")
+    if dscr is not None:
+        parts.append(f"DSCR {Decimal(dscr.actual):.2f}x < {Decimal(dscr.threshold):.2f}x")
+    ltv = failed.get("max_ltv")
+    if ltv is not None:
+        parts.append(
+            f"LTV {_percent(Decimal(ltv.actual))} > {_percent(Decimal(ltv.threshold))}"
+        )
+    absolute = failed.get("absolute_max_price")
+    if absolute is not None:
+        parts.append(f"price {_money(Decimal(absolute.actual))} > {_money(Decimal(absolute.threshold))}")
+    return "Fails on valuation: " + ", ".join(parts)
 
 
 def run_underwriting(
@@ -29,4 +88,23 @@ def run_underwriting(
 
     Must be a pure function of (values, policy). Same inputs, same output, every time.
     """
-    raise NotImplementedError("W1: dealsieve.underwriting.engine.run_underwriting")
+    price = values.asking_price
+    normalized = normalize_economics(values, policy, price)
+    financing = compute_financing(normalized.noi, price, policy)
+    gates = evaluate_gates(values, normalized, financing, policy)
+    viability = solve_max_viable_price(values, policy)
+    status = classify(gates, viability, price, policy)
+    return UnderwritingResult(
+        opportunity_id=opportunity_id,
+        policy_version=policy.policy_version,
+        trigger_event_id=trigger_event_id,
+        inputs=values,
+        normalized=normalized,
+        financing=financing,
+        stress=run_stress(values, policy, price),
+        gates=gates,
+        status=status,
+        viability=viability,
+        comparison=broker_vs_dealsieve(values, normalized, financing),
+        failure_summary=_failure_summary(status, gates, price),
+    )

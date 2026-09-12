@@ -1,0 +1,15 @@
+{
+  "asking_price": 1250000,
+  "is_price_change": true,
+  "evidence": [
+    {
+      "evidence_id": "ev_fixture_02_price",
+      "field": "asking_price",
+      "value": 1250000,
+      "source_document": "<price-drop-2026-0912-power-inn@brokerage.example>",
+      "location": "email body",
+      "quote": "Seller reduced this to $1.25M",
+      "confidence": 1.0
+    }
+  ]
+}

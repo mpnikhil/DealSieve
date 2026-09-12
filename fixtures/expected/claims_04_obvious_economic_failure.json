@@ -1,0 +1,100 @@
+{
+  "address_line": "9100 Commerce Circle",
+  "city": "Sacramento",
+  "state": "CA",
+  "postal_code": "95828",
+  "property_type": "industrial",
+  "building_sqft": 18000,
+  "asking_price": 2400000,
+  "stated_noi": 120000,
+  "stated_cap_rate": 0.05,
+  "stated_gross_income": 180000,
+  "stated_other_income": 0,
+  "stated_vacancy_pct": 0,
+  "stated_expenses": {
+    "property_tax": 18000,
+    "insurance": 9000,
+    "repairs_maintenance": 11000,
+    "utilities": 12000,
+    "management": null,
+    "cam_other": 10000,
+    "total": 60000
+  },
+  "tenant_count": 6,
+  "occupancy_pct": 1,
+  "largest_tenant_pct": 0.20,
+  "tenants": [
+    {"name": "Commerce Tenant 1", "annual_rent": 36000},
+    {"name": "Commerce Tenant 2", "annual_rent": 30000},
+    {"name": "Commerce Tenant 3", "annual_rent": 30000},
+    {"name": "Commerce Tenant 4", "annual_rent": 30000},
+    {"name": "Commerce Tenant 5", "annual_rent": 27000},
+    {"name": "Commerce Tenant 6", "annual_rent": 27000}
+  ],
+  "is_price_change": false,
+  "evidence": [
+    {
+      "evidence_id": "ev_fixture_04_identity",
+      "field": "address_line",
+      "value": "9100 Commerce Circle",
+      "source_document": "<commerce-circle-2026-0912@westcoastcre.example>",
+      "location": "email body",
+      "quote": "9100 Commerce Circle, Sacramento, CA 95828",
+      "confidence": 1.0
+    },
+    {
+      "evidence_id": "ev_fixture_04_price",
+      "field": "asking_price",
+      "value": 2400000,
+      "source_document": "<commerce-circle-2026-0912@westcoastcre.example>",
+      "location": "email body",
+      "quote": "Asking price is $2,400,000",
+      "confidence": 1.0
+    },
+    {
+      "evidence_id": "ev_fixture_04_income",
+      "field": "stated_gross_income",
+      "value": 180000,
+      "source_document": "<commerce-circle-2026-0912@westcoastcre.example>",
+      "location": "email body",
+      "quote": "$180,000 gross scheduled annual rent",
+      "confidence": 1.0
+    },
+    {
+      "evidence_id": "ev_fixture_04_noi",
+      "field": "stated_noi",
+      "value": 120000,
+      "source_document": "<commerce-circle-2026-0912@westcoastcre.example>",
+      "location": "email body",
+      "quote": "Seller states $120,000 NOI",
+      "confidence": 1.0
+    },
+    {
+      "evidence_id": "ev_fixture_04_expenses",
+      "field": "stated_expenses",
+      "value": 60000,
+      "source_document": "<commerce-circle-2026-0912@westcoastcre.example>",
+      "location": "email body",
+      "quote": "$60,000 of annual expenses",
+      "confidence": 1.0
+    },
+    {
+      "evidence_id": "ev_fixture_04_tenants",
+      "field": "tenants",
+      "value": "six tenants totaling $180,000 annual rent",
+      "source_document": "<commerce-circle-2026-0912@westcoastcre.example>",
+      "location": "email body",
+      "quote": "Annual rents are $36,000, $30,000, $30,000, $30,000, $27,000, and $27,000",
+      "confidence": 1.0
+    },
+    {
+      "evidence_id": "ev_fixture_04_largest",
+      "field": "largest_tenant_pct",
+      "value": 0.2,
+      "source_document": "<commerce-circle-2026-0912@westcoastcre.example>",
+      "location": "email body",
+      "quote": "no tenant contributes more than 20%",
+      "confidence": 0.95
+    }
+  ]
+}

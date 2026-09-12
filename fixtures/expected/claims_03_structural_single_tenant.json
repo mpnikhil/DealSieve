@@ -1,0 +1,78 @@
+{
+  "address_line": "4500 Florin Perkins Road",
+  "city": "Sacramento",
+  "state": "CA",
+  "postal_code": "95826",
+  "property_type": "industrial",
+  "building_sqft": 12000,
+  "asking_price": 950000,
+  "stated_noi": 92000,
+  "stated_cap_rate": 0.0968,
+  "stated_gross_income": 100000,
+  "stated_other_income": 0,
+  "stated_vacancy_pct": 0,
+  "stated_expenses": {
+    "property_tax": 4000,
+    "insurance": 1500,
+    "repairs_maintenance": 1000,
+    "utilities": 1000,
+    "management": null,
+    "cam_other": 500,
+    "total": 8000
+  },
+  "tenant_count": 2,
+  "occupancy_pct": 1,
+  "largest_tenant_pct": 0.78,
+  "tenants": [
+    {"name": "FP Distribution LLC", "suite": "A", "sqft": 9000, "annual_rent": 78000, "lease_end": "2031-12-31"},
+    {"name": "Valley Repair Co.", "suite": "B", "sqft": 3000, "annual_rent": 22000, "lease_end": "2027-10-31"}
+  ],
+  "is_price_change": false,
+  "evidence": [
+    {
+      "evidence_id": "ev_fixture_03_price",
+      "field": "asking_price",
+      "value": 950000,
+      "source_document": "<florin-perkins-2026-0912@capitalindustrial.example>",
+      "location": "email body",
+      "quote": "Asking is $950,000",
+      "confidence": 1.0
+    },
+    {
+      "evidence_id": "ev_fixture_03_noi",
+      "field": "stated_noi",
+      "value": 92000,
+      "source_document": "<florin-perkins-2026-0912@capitalindustrial.example>",
+      "location": "email body",
+      "quote": "stated NOI is $92,000",
+      "confidence": 1.0
+    },
+    {
+      "evidence_id": "ev_fixture_03_rent_roll",
+      "field": "tenants",
+      "value": "2 tenants totaling $100,000 annual rent",
+      "source_document": "Florin_Perkins_OM.md",
+      "location": "OM: Rent Roll table",
+      "quote": "FP Distribution LLC | A | 9,000 | $78,000",
+      "confidence": 1.0
+    },
+    {
+      "evidence_id": "ev_fixture_03_largest",
+      "field": "largest_tenant_pct",
+      "value": 0.78,
+      "source_document": "Florin_Perkins_OM.md",
+      "location": "OM: Rent Roll table",
+      "quote": "Largest tenant share: 78%",
+      "confidence": 1.0
+    },
+    {
+      "evidence_id": "ev_fixture_03_expenses",
+      "field": "stated_expenses",
+      "value": 8000,
+      "source_document": "Florin_Perkins_OM.md",
+      "location": "OM: Stated annual operating expenses",
+      "quote": "total $8,000",
+      "confidence": 1.0
+    }
+  ]
+}
