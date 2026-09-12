@@ -1,0 +1,26 @@
+{
+  "_comment": "Scripted acquisition-agent turns for fixtures/emails/04_obvious_economic_failure.eml. Overpriced by a wide margin: WATCH, far outside the NEAR band, silent.",
+  "turns": [
+    {
+      "tool_calls": [
+        {
+          "name": "record_claims",
+          "input_ref": "fixtures/expected/claims_04_obvious_economic_failure.json",
+          "input_arg": "claims"
+        }
+      ]
+    },
+    {
+      "tool_calls": [
+        {
+          "name": "underwrite",
+          "input": {}
+        }
+      ]
+    },
+    {
+      "final_text": "WATCH, and a long way from viable: the asking price would have to fall well past the near-threshold band before this clears the cap rate and DSCR gates. Filed and monitored; no human attention required."
+    }
+  ],
+  "structured_outputs": {}
+}

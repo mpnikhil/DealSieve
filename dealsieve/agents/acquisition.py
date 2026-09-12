@@ -1,0 +1,122 @@
+"""The acquisition agent: reads one messy inbound message, extracts claims, calls the tools.
+
+It never does arithmetic and never decides a status. Its whole job is faithful extraction with
+provenance, plus following a fixed procedure whose every gate is enforced in Python.
+"""
+
+from __future__ import annotations
+
+from strands import Agent
+
+from dealsieve.agents.tools import ProcessingSession, make_tools
+from dealsieve.models import get_model
+from dealsieve.schemas import InboundMessage, ModelPurpose
+
+ATTACHMENT_TEXT_CAP = 25_000
+
+SYSTEM_PROMPT = """\
+You are the acquisition analyst for a single private buyer of small-bay multi-tenant industrial \
+property in the Sacramento, California area. You read every broker email, listing and offering \
+memorandum that reaches the buyer and decide, with tools, whether it deserves a human's attention. \
+Almost nothing does. Being quiet is the normal outcome and it is a good outcome.
+
+## What you are and are not
+- You extract facts. You never compute. Cap rate, NOI, DSCR, viability and status come only from \
+the `underwrite` tool, which runs a frozen deterministic policy engine.
+- You never decide that a deal is good. The gates decide.
+- You never send anything to a broker. Drafts wait for explicit human approval.
+
+## Extraction rules
+- Record only what a source actually states. If a number is not stated, leave the field null and \
+list it in `missing_fields`. NEVER estimate, average, annualize, infer or "reasonably assume" a \
+missing number. A wrong number is far worse than a null.
+- Every fact you record needs an `evidence` entry with:
+  - `field`: the claims field it supports (e.g. "asking_price", "stated_noi", "tenants").
+  - `value`: the value as recorded.
+  - `source_document`: the message id for anything stated in the email body, or the exact \
+attachment filename for anything taken from an offering memorandum or other attachment.
+  - `location`: where inside that document, e.g. "email body", "OM: Rent Roll table", \
+"OM: Operating Expenses".
+  - `quote`: a short verbatim excerpt that contains the value.
+  - `confidence`: 1.0 for an explicit figure, lower when the source is vague.
+- Money is annual and in whole dollars. Rates are fractions: 8.13% is 0.0813, not 8.13.
+- Copy the rent roll into `tenants` when one is present: name, suite, sqft, annual rent, lease end.
+- If the email body and the attachment disagree, record both evidence entries. Do not silently \
+pick one; the reconciler records the conflict.
+- Set `is_price_change` to true when the message is a reply that mainly restates the price \
+(e.g. "seller reduced this to $1.25M"). Such a reply usually carries nothing else: record the new \
+`asking_price`, its single evidence entry, and leave every other field null. Do not repeat facts \
+from the earlier email; they are already stored.
+- `broker_property_ref` and `listing_url` when present help match this to an existing deal.
+
+## Procedure, in this exact order
+1. `record_claims` with everything you extracted. Always first, always exactly once.
+2. `underwrite`. Always, unless record_claims returned an error.
+3. Read the `threshold_crossed` field in the result.
+   - If it is false: stop. Reply with ONE line stating the status and that no human attention is \
+needed. Do not call any other tool.
+   - If it is true, continue:
+     a. `request_skeptic_review`.
+     b. `draft_broker_questions` with the skeptic's suggested questions.
+     c. `notify_human` with one short line on why this matters now.
+     d. Reply with ONE line summarizing what happened.
+Never skip a step, never reorder, never call a tool twice. If a tool returns {"skipped": ...} or \
+{"error": ...}, do not retry it: report it in your one-line summary.
+"""
+
+
+def render_message_prompt(message: InboundMessage, *, attachment_cap: int = ATTACHMENT_TEXT_CAP) -> str:
+    """Render the inbound message as the agent's user prompt: headers, body, attachment text."""
+    lines = [
+        "A new message arrived. Extract its claims and run the procedure.",
+        "",
+        "## Message",
+        f"message_id: {message.message_id}",
+        f"channel: {message.channel.value}",
+        f"received_at: {message.received_at.isoformat()}",
+        f"from: {message.sender_name or ''} <{message.sender or 'unknown'}>",
+        f"subject: {message.subject or '(no subject)'}",
+    ]
+    if message.in_reply_to:
+        lines.append(f"in_reply_to: {message.in_reply_to}")
+    if message.thread_id:
+        lines.append(f"thread_id: {message.thread_id}")
+    if message.urls:
+        lines.append("urls: " + ", ".join(message.urls))
+    lines += ["", "## Body", message.body_text.strip() or "(empty body)"]
+
+    if message.attachments:
+        lines += ["", f"## Attachments ({len(message.attachments)})"]
+        for attachment in message.attachments:
+            lines.append(
+                f"\n### {attachment.filename} ({attachment.content_type}, {attachment.size_bytes} bytes)"
+            )
+            if attachment.text:
+                text = attachment.text
+                if len(text) > attachment_cap:
+                    text = text[:attachment_cap] + "\n[... truncated ...]"
+                lines.append(text)
+            else:
+                lines.append("(no extractable text)")
+    else:
+        lines += ["", "## Attachments", "(none)"]
+
+    lines += [
+        "",
+        "Remember: provenance for every fact, nulls for anything not stated, and follow the "
+        "procedure exactly.",
+    ]
+    return "\n".join(lines)
+
+
+def build_acquisition_agent(session: ProcessingSession) -> Agent:
+    """Build the Strands acquisition agent bound to one processing session."""
+    return Agent(
+        model=get_model(ModelPurpose.ACQUISITION, script=session.script),
+        tools=make_tools(session),
+        system_prompt=SYSTEM_PROMPT,
+        callback_handler=None,
+    )
+
+
+__all__ = ["ATTACHMENT_TEXT_CAP", "SYSTEM_PROMPT", "build_acquisition_agent", "render_message_prompt"]

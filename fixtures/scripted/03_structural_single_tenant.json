@@ -1,0 +1,26 @@
+{
+  "_comment": "Scripted acquisition-agent turns for fixtures/emails/03_structural_single_tenant.eml. Cheap on paper, structurally dead: one tenant is ~78% of the rent. The agent must stay silent.",
+  "turns": [
+    {
+      "tool_calls": [
+        {
+          "name": "record_claims",
+          "input_ref": "fixtures/expected/claims_03_structural_single_tenant.json",
+          "input_arg": "claims"
+        }
+      ]
+    },
+    {
+      "tool_calls": [
+        {
+          "name": "underwrite",
+          "input": {}
+        }
+      ]
+    },
+    {
+      "final_text": "DEAD on structure: 2 tenants and a largest tenant at ~78% of rent. No price fixes that, so it is not monitored and no one was interrupted."
+    }
+  ],
+  "structured_outputs": {}
+}

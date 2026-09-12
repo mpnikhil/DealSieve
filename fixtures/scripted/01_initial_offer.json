@@ -1,0 +1,26 @@
+{
+  "_comment": "Scripted acquisition-agent turns for fixtures/emails/01_initial_offer.eml. Replayed by dealsieve.models.scripted.ScriptedModel: one turn per stream() call. input_ref is relative to the repo root; input_arg wraps the loaded JSON as a single named tool argument (record_claims takes claims: ExtractedClaims).",
+  "turns": [
+    {
+      "tool_calls": [
+        {
+          "name": "record_claims",
+          "input_ref": "fixtures/expected/claims_01_initial_offer.json",
+          "input_arg": "claims"
+        }
+      ]
+    },
+    {
+      "tool_calls": [
+        {
+          "name": "underwrite",
+          "input": {}
+        }
+      ]
+    },
+    {
+      "final_text": "Deal recorded and underwritten: WATCH. Broker cap 8.13% is 6.4% normalized after a tax reset, management and CapEx reserve; it fails on valuation only. No human attention required."
+    }
+  ],
+  "structured_outputs": {}
+}
