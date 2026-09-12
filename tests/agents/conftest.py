@@ -393,6 +393,7 @@ def claims() -> ExtractedClaims:
 def recording_notifier():
     class _Recorder:
         name = "recording"
+        channel = Channel.MANUAL
 
         def __init__(self) -> None:
             self.sent: list[Notification] = []

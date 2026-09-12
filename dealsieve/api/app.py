@@ -1,0 +1,298 @@
+"""FastAPI surface for DealSieve. Routes and payload shapes per docs/CONTRACTS.md.
+
+`create_app(repo=None, policy=None, notifier=None)` builds the app; omitted dependencies are constructed
+lazily (on first request) from the environment (DEALSIEVE_DB_PATH, DEALSIEVE_POLICY_PATH, DEALSIEVE_NOTIFIER,
+...). Building lazily keeps `import dealsieve.api.app` safe even while W1/W2/W3 stubs still raise
+NotImplementedError -- the module-level `app` object below can always be imported; only *using* an
+unfinished dependency at request time fails.
+
+Every JSON body is produced from the pydantic contracts in `dealsieve.schemas` via `model_dump_json()` (or
+a `TypeAdapter` for lists of them) so `Money`/`Rate` fields serialize as plain numbers, never strings.
+"""
+
+from __future__ import annotations
+
+import os
+from decimal import Decimal
+from pathlib import Path
+from typing import Any, Literal
+
+from fastapi import Depends, FastAPI, HTTPException, Query, Request
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import HTMLResponse, JSONResponse, Response
+from fastapi.staticfiles import StaticFiles
+from pydantic import BaseModel, TypeAdapter
+
+from dealsieve.ingestion.email import parse_eml
+from dealsieve.ingestion.text import from_text
+from dealsieve.notifications import Notifier, get_notifier
+from dealsieve.persistence import Repo
+from dealsieve.pipeline import process_inbound
+from dealsieve.policy import InvestmentPolicy, load_policy
+from dealsieve.schemas import (
+    Actor,
+    Channel,
+    EventType,
+    Notification,
+    Opportunity,
+    OpportunityEvent,
+    OpportunityStatus,
+    OutboundDraft,
+    WatchlistItem,
+    now_utc,
+)
+
+REPO_ROOT = Path(__file__).resolve().parents[2]
+FRONTEND_DIST = REPO_ROOT / "frontend" / "dist"
+
+_LOCALHOST_ORIGIN_REGEX = r"^https?://(localhost|127\.0\.0\.1)(:\d+)?$"
+
+_PLACEHOLDER_HTML = """<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><title>DealSieve</title></head>
+<body style="font-family: system-ui, sans-serif; max-width: 40rem; margin: 4rem auto; color: #222;">
+<h1>DealSieve API is running</h1>
+<p>The dashboard has not been built yet (no <code>frontend/dist/index.html</code>).</p>
+<p>Build the frontend, or use the API directly: <a href="/api/health">/api/health</a>,
+<a href="/api/stats">/api/stats</a>, <a href="/api/opportunities">/api/opportunities</a>.</p>
+</body>
+</html>
+"""
+
+_watchlist_adapter: TypeAdapter[list[WatchlistItem]] = TypeAdapter(list[WatchlistItem])
+_notification_adapter: TypeAdapter[list[Notification]] = TypeAdapter(list[Notification])
+_draft_adapter: TypeAdapter[list[OutboundDraft]] = TypeAdapter(list[OutboundDraft])
+
+
+def _json(model: BaseModel, *, status_code: int = 200) -> Response:
+    return Response(content=model.model_dump_json(), media_type="application/json", status_code=status_code)
+
+
+def _json_list(adapter: TypeAdapter[Any], items: list[Any]) -> Response:
+    return Response(content=adapter.dump_json(items), media_type="application/json")
+
+
+def _decimal_to_number(obj: Any) -> Any:
+    """Recursively turn Decimal into float so plain (non-Money/Rate) policy fields serialize as numbers."""
+    if isinstance(obj, Decimal):
+        return float(obj)
+    if isinstance(obj, dict):
+        return {k: _decimal_to_number(v) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [_decimal_to_number(v) for v in obj]
+    return obj
+
+
+def _backend_name() -> str:
+    try:
+        from dealsieve.models.backend import backend_name
+
+        return backend_name()
+    except Exception:
+        return os.environ.get("DEALSIEVE_MODEL_BACKEND", "unknown")
+
+
+def _default_repo() -> Repo:
+    db_path = Path(os.environ.get("DEALSIEVE_DB_PATH", "data/dealsieve.db"))
+    db_path.parent.mkdir(parents=True, exist_ok=True)
+    repo = Repo(db_path)
+    repo.init_schema()
+    return repo
+
+
+def _opportunity_to_watchlist_item(opp: Opportunity) -> WatchlistItem:
+    viability = opp.viability
+    return WatchlistItem(
+        opportunity_id=opp.opportunity_id,
+        deal_number=opp.deal_number,
+        display_name=opp.display_name,
+        status=opp.status,
+        current_asking_price=opp.current_asking_price,
+        max_viable_price=viability.max_viable_price if viability else None,
+        distance_pct=viability.distance_pct if viability else None,
+        binding_constraints=viability.binding_constraints if viability else [],
+        reason_summary=opp.reason_summary,
+        updated_at=opp.updated_at,
+    )
+
+
+class IngestTextBody(BaseModel):
+    text: str
+    sender: str | None = None
+    channel: Literal["telegram", "manual"] = "manual"
+
+
+def create_app(
+    *,
+    repo: Repo | None = None,
+    policy: InvestmentPolicy | None = None,
+    notifier: Notifier | None = None,
+) -> FastAPI:
+    app = FastAPI(title="DealSieve", version="0.1.0")
+
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origin_regex=_LOCALHOST_ORIGIN_REGEX,
+        allow_credentials=True,
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
+
+    # Stored on app.state so dependencies can build them lazily (None means "not built yet").
+    app.state.repo = repo
+    app.state.policy = policy
+    app.state.notifier = notifier
+
+    def get_repo(request: Request) -> Repo:
+        if request.app.state.repo is None:
+            request.app.state.repo = _default_repo()
+        return request.app.state.repo
+
+    def get_policy(request: Request) -> InvestmentPolicy:
+        if request.app.state.policy is None:
+            request.app.state.policy = load_policy()
+        return request.app.state.policy
+
+    def get_notifier_dep(request: Request) -> Notifier:
+        if request.app.state.notifier is None:
+            request.app.state.notifier = get_notifier()
+        return request.app.state.notifier
+
+    # ----------------------------------------------------------------------------------- health / stats
+
+    @app.get("/api/health")
+    def health(policy: InvestmentPolicy = Depends(get_policy)) -> JSONResponse:  # noqa: B008
+        return JSONResponse(
+            {"status": "ok", "backend": _backend_name(), "policy_version": policy.policy_version}
+        )
+
+    @app.get("/api/stats")
+    def stats(repo: Repo = Depends(get_repo), policy: InvestmentPolicy = Depends(get_policy)) -> Response:  # noqa: B008
+        return _json(repo.dashboard_stats(policy.policy_version))
+
+    @app.get("/api/policy")
+    def get_policy_route(policy: InvestmentPolicy = Depends(get_policy)) -> JSONResponse:  # noqa: B008
+        return JSONResponse(_decimal_to_number(policy.model_dump(mode="python")))
+
+    # ----------------------------------------------------------------------------------- opportunities
+
+    @app.get("/api/opportunities")
+    def list_opportunities(
+        include_dead: bool = Query(default=False),
+        repo: Repo = Depends(get_repo),  # noqa: B008
+    ) -> Response:
+        items = list(repo.watchlist())
+        if include_dead:
+            dead = [_opportunity_to_watchlist_item(o) for o in repo.list_opportunities(OpportunityStatus.DEAD)]
+            items = items + dead
+        return _json_list(_watchlist_adapter, items)
+
+    @app.get("/api/opportunities/{opportunity_id}")
+    def get_opportunity_detail(opportunity_id: str, repo: Repo = Depends(get_repo)) -> Response:  # noqa: B008
+        detail = repo.opportunity_detail(opportunity_id)
+        if detail is None:
+            raise HTTPException(status_code=404, detail=f"No opportunity matching {opportunity_id!r}")
+        return _json(detail)
+
+    # ----------------------------------------------------------------------------------- drafts
+
+    @app.get("/api/drafts")
+    def list_drafts(status: str | None = Query(default=None), repo: Repo = Depends(get_repo)) -> Response:  # noqa: B008
+        return _json_list(_draft_adapter, list(repo.list_drafts(status=status)))
+
+    def _decide_draft(draft_id: str, *, approve: bool, repo: Repo) -> OutboundDraft:
+        draft = repo.get_draft(draft_id)
+        if draft is None:
+            raise HTTPException(status_code=404, detail=f"No draft {draft_id!r}")
+        new_status: Literal["approved", "rejected"] = "approved" if approve else "rejected"
+        updated = draft.model_copy(update={"status": new_status, "decided_at": now_utc()})
+        repo.update_draft(updated)
+        event = OpportunityEvent(
+            opportunity_id=draft.opportunity_id,
+            type=EventType.HUMAN_APPROVED_DRAFT if approve else EventType.HUMAN_REJECTED_DRAFT,
+            actor=Actor.HUMAN,
+            summary=f"Human {'approved' if approve else 'rejected'} broker draft {draft.draft_id}"
+            + (f" to {draft.to_email}" if draft.to_email else ""),
+            payload={"draft_id": draft.draft_id},
+        )
+        repo.append_event(event)
+        return updated
+
+    @app.post("/api/drafts/{draft_id}/approve")
+    def approve_draft(draft_id: str, repo: Repo = Depends(get_repo)) -> Response:  # noqa: B008
+        # Approval only records HUMAN_APPROVED_DRAFT. Nothing is ever sent from here.
+        return _json(_decide_draft(draft_id, approve=True, repo=repo))
+
+    @app.post("/api/drafts/{draft_id}/reject")
+    def reject_draft(draft_id: str, repo: Repo = Depends(get_repo)) -> Response:  # noqa: B008
+        return _json(_decide_draft(draft_id, approve=False, repo=repo))
+
+    # ----------------------------------------------------------------------------------- notifications
+
+    @app.get("/api/notifications")
+    def list_notifications(
+        opportunity_id: str | None = Query(default=None), repo: Repo = Depends(get_repo)  # noqa: B008
+    ) -> Response:
+        return _json_list(_notification_adapter, list(repo.list_notifications(opportunity_id=opportunity_id)))
+
+    # ----------------------------------------------------------------------------------- ingestion
+
+    @app.post("/api/ingest/email")
+    async def ingest_email(
+        request: Request,
+        repo: Repo = Depends(get_repo),  # noqa: B008
+        policy: InvestmentPolicy = Depends(get_policy),  # noqa: B008
+        notifier: Notifier = Depends(get_notifier_dep),  # noqa: B008
+    ) -> Response:
+        content_type = request.headers.get("content-type", "")
+        if content_type.startswith("multipart/form-data"):
+            form = await request.form()
+            upload = form.get("file")
+            if upload is None:
+                raise HTTPException(status_code=400, detail="multipart body must include a 'file' field")
+            raw: bytes = await upload.read()  # type: ignore[union-attr]
+        else:
+            raw = await request.body()
+        if not raw:
+            raise HTTPException(status_code=400, detail="empty request body")
+        message = parse_eml(raw)
+        outcome = process_inbound(message, repo=repo, policy=policy, notifier=notifier)
+        return _json(outcome)
+
+    @app.post("/api/ingest/text")
+    async def ingest_text(
+        body: IngestTextBody,
+        repo: Repo = Depends(get_repo),  # noqa: B008
+        policy: InvestmentPolicy = Depends(get_policy),  # noqa: B008
+        notifier: Notifier = Depends(get_notifier_dep),  # noqa: B008
+    ) -> Response:
+        message = from_text(body.text, channel=Channel(body.channel), sender=body.sender)
+        outcome = process_inbound(message, repo=repo, policy=policy, notifier=notifier)
+        return _json(outcome)
+
+    # ----------------------------------------------------------------------------------- static / SPA
+
+    assets_dir = FRONTEND_DIST / "assets"
+    if assets_dir.is_dir():
+        app.mount("/assets", StaticFiles(directory=str(assets_dir)), name="assets")
+
+    def _spa_response() -> HTMLResponse:
+        index_file = FRONTEND_DIST / "index.html"
+        if index_file.is_file():
+            return HTMLResponse(index_file.read_text(encoding="utf-8"))
+        return HTMLResponse(_PLACEHOLDER_HTML)
+
+    @app.get("/", include_in_schema=False)
+    def spa_root() -> HTMLResponse:
+        return _spa_response()
+
+    @app.get("/{full_path:path}", include_in_schema=False)
+    def spa_fallback(full_path: str) -> HTMLResponse:
+        if full_path == "api" or full_path.startswith("api/"):
+            raise HTTPException(status_code=404, detail="Not found")
+        return _spa_response()
+
+    return app
+
+
+app = create_app()

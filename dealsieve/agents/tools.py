@@ -555,8 +555,15 @@ def perform_notify_human(
     if opp is None or session.run_after is None:
         return {"skipped": "no completed underwriting run"}
 
+    # Tag the record with where the alert actually went, not a hardcoded channel. Notifiers
+    # declare `channel` (base.Notifier); fall back to the formatter's default if one does not.
+    channel = getattr(session.notifier, "channel", None)
     notification = format_threshold_alert(
-        opp, session.run_before, session.run_after, session.skeptic_report
+        opp,
+        session.run_before,
+        session.run_after,
+        session.skeptic_report,
+        **({"channel": channel} if channel is not None else {}),
     )
     delivery_ref = session.notifier.send(notification)
     notification.delivered = delivery_ref is not None

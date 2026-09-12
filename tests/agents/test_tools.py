@@ -19,6 +19,7 @@ from dealsieve.agents.tools import (
 from dealsieve.evidence.reconcile import DetectedChange, MissingInputs
 from dealsieve.schemas import (
     Actor,
+    Channel,
     EventType,
     IdentityKeys,
     OpportunityStatus,
@@ -336,6 +337,35 @@ def test_notify_human_fires_once_on_a_crossing(session, claims, fake_repo, monke
     second = perform_notify_human(session, "again")
     assert second == {"skipped": "the human has already been notified for this message"}
     assert len(session.notifier.sent) == 1, "exactly one human interruption"
+
+
+def test_the_notification_is_tagged_with_the_notifier_s_own_channel(session, claims, monkeypatch):
+    record(session, claims)
+    underwrite_as(session, monkeypatch, OpportunityStatus.REVIEW, cap=Decimal("0.083"), dscr=Decimal("1.43"))
+
+    result = perform_notify_human(session, "crossed")
+    assert result["channel"] == Channel.MANUAL.value, "a console demo must not be tagged telegram"
+    assert session.notification.channel == Channel.MANUAL
+
+
+def test_a_notifier_without_a_channel_falls_back_to_the_formatter_default(session, claims, monkeypatch):
+    class _Bare:
+        name = "bare"
+
+        def __init__(self) -> None:
+            self.sent = []
+
+        def send(self, notification):
+            self.sent.append(notification)
+            return None
+
+    session.notifier = _Bare()
+    record(session, claims)
+    underwrite_as(session, monkeypatch, OpportunityStatus.REVIEW, cap=Decimal("0.083"), dscr=Decimal("1.43"))
+
+    result = perform_notify_human(session, "crossed")
+    assert result["channel"] == Channel.TELEGRAM.value
+    assert result["delivered"] is False, "a notifier returning no reference did not deliver"
 
 
 def test_events_can_be_attributed_to_the_system_actor(session, claims, fake_repo, monkeypatch):
