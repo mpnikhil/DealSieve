@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { fetchStats, fetchWatchlist } from '../api';
+import { fetchStats, fetchWatchlist, tickDiligence } from '../api';
 import type { DashboardStats, WatchlistItem } from '../types';
 import { StatusPill } from '../components/StatusPill';
 import { formatMoney, formatRelativeTime, formatConstraintLabel } from '../utils/format';
@@ -11,6 +11,27 @@ export function Overview({ setPolicyVersion }: { setPolicyVersion: (v: string) =
   const [watchlist, setWatchlist] = useState<WatchlistItem[]>([]);
   const [loading, setLoading] = useState(true);
   const [includeDead, setIncludeDead] = useState(false);
+  const [ticking, setTicking] = useState(false);
+  const [tickResult, setTickResult] = useState<string | null>(null);
+
+  const handleTick = async () => {
+    try {
+      setTicking(true);
+      const res = await tickDiligence();
+      setTickResult(`Sent ${res.sent} follow-up${res.sent !== 1 ? 's' : ''} · ${res.stalled} stalled`);
+      // Refresh list
+      const [s, w] = await Promise.all([fetchStats(), fetchWatchlist(includeDead)]);
+      setStats(s);
+      setWatchlist(w);
+      setTimeout(() => setTickResult(null), 5000);
+    } catch (err) {
+      console.error(err);
+      setTickResult("Error running follow-ups");
+      setTimeout(() => setTickResult(null), 3000);
+    } finally {
+      setTicking(false);
+    }
+  };
 
   useEffect(() => {
     let active = true;
@@ -40,20 +61,31 @@ export function Overview({ setPolicyVersion }: { setPolicyVersion: (v: string) =
     <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8 space-y-8">
       {/* Stat strip */}
       {stats && (
-        <div className="grid grid-cols-2 md:grid-cols-6 gap-4">
+        <div className="grid grid-cols-2 md:grid-cols-7 gap-4">
           <StatCard label="Encountered" value={stats.encountered} />
           <StatCard label="Rejected (DEAD)" value={stats.dead} />
           <StatCard label="Watching" value={stats.watch} />
           <StatCard label="Near Threshold" value={stats.near} highlight={stats.near > 0 ? "orange" : undefined} />
           <StatCard label="Reviewing" value={stats.review} highlight={stats.review > 0 ? "green" : undefined} />
           <StatCard label="Interruptions (7d)" value={stats.human_interruptions_7d} />
+          <StatCard label="Awaiting broker" value={stats.open_diligence_requests} />
         </div>
       )}
 
       {/* Watchlist */}
       <div className="bg-white border border-slate-200 shadow-sm rounded-lg overflow-hidden">
         <div className="px-4 py-4 border-b border-slate-200 flex justify-between items-center bg-slate-50">
-          <h2 className="text-base font-semibold text-slate-900">Watchlist</h2>
+          <h2 className="text-base font-semibold text-slate-900 flex items-center gap-3">
+            Watchlist
+            <button 
+              onClick={handleTick}
+              disabled={ticking}
+              className="text-xs px-2 py-1 bg-white border border-slate-300 rounded text-slate-700 hover:bg-slate-50 disabled:opacity-50"
+            >
+              {ticking ? 'Running...' : 'Run follow-ups'}
+            </button>
+            {tickResult && <span className="text-xs text-slate-500 font-normal">{tickResult}</span>}
+          </h2>
           <label className="flex items-center gap-2 text-sm text-slate-600 cursor-pointer">
             <input 
               type="checkbox" 

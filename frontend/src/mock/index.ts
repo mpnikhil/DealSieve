@@ -557,6 +557,7 @@ export const mockOpportunityDetail: OpportunityDetail = {
     {
       draft_id: "drf_1",
       opportunity_id: "opp_101",
+      kind: "information_request",
       to_email: "broker@example.com",
       subject: "Re: Off-market: 8-unit small-bay industrial",
       body: "Hi John,\n\nThanks for sending this over. The numbers look workable at the new price, but we have a few quick questions before drafting a LOI:",
@@ -565,27 +566,196 @@ export const mockOpportunityDetail: OpportunityDetail = {
         "Is there a recent Phase I available?",
         "Could you provide the 2024 and 2025 YTD CAM reconciliation?"
       ],
-      status: "pending",
+      request_ids: ["dil_1", "dil_2", "dil_3"],
+      requires_approval: false,
+      status: "sent",
+      in_reply_to_message_id: "msg_2",
+      delivery_ref: "email_sent_1",
       created_at: new Date(Date.now() - 1000 * 60 * 60 * 1.8).toISOString(),
+      decided_at: new Date(Date.now() - 1000 * 60 * 60 * 1.8).toISOString(),
+      sent_at: new Date(Date.now() - 1000 * 60 * 60 * 1.8).toISOString()
+    },
+    {
+      draft_id: "drf_2",
+      opportunity_id: "opp_101",
+      kind: "follow_up",
+      to_email: "broker@example.com",
+      subject: "Re: Off-market: 8-unit small-bay industrial",
+      body: "Hi John,\n\nJust following up on the Phase I and CAM reconciliation.",
+      questions: [],
+      request_ids: ["dil_2", "dil_3"],
+      requires_approval: false,
+      status: "sent",
+      in_reply_to_message_id: "drf_1",
+      delivery_ref: "email_sent_2",
+      created_at: new Date(Date.now() - 1000 * 60 * 60 * 0.5).toISOString(),
+      decided_at: new Date(Date.now() - 1000 * 60 * 60 * 0.5).toISOString(),
+      sent_at: new Date(Date.now() - 1000 * 60 * 60 * 0.5).toISOString()
+    },
+    {
+      draft_id: "drf_3",
+      opportunity_id: "opp_101",
+      kind: "credit_request",
+      to_email: "broker@example.com",
+      subject: "Re: Off-market: 8-unit small-bay industrial",
+      body: "Hi John,\n\nWe reviewed the inspection report. The roof needs immediate replacement and HVAC units are deferred. We would need a $90k price adjustment to proceed.",
+      questions: [],
+      request_ids: [],
+      requires_approval: true,
+      status: "pending",
+      in_reply_to_message_id: "msg_3",
+      delivery_ref: null,
+      created_at: new Date(Date.now() - 1000 * 60 * 30).toISOString(),
       decided_at: null,
       sent_at: null
     }
   ],
   notifications: [
     {
-      notification_id: "ntf_1",
+      notification_id: "ntf_2",
       opportunity_id: "opp_101",
-      kind: "threshold_crossed",
+      kind: "fell_below_threshold",
       channel: "telegram",
-      title: "DEAL #101 JUST BECAME INVESTABLE",
-      body: "8-unit small-bay industrial, Power Inn Rd, Sacramento\n\nPrice            $1,550,000 -> $1,250,000\nNormalized cap   6.42% -> 8.27%   PASS\nDSCR             1.05x -> 1.43x   PASS",
+      title: "DEAL #101 REQUIRES ATTENTION",
+      body: "Fell below threshold due to new immediate capex.",
       actions: [
-        { label: "Review", action: "review" },
-        { label: "Draft Questions", action: "draft_questions" }
+        { label: "Review", action: "review" }
       ],
-      created_at: new Date(Date.now() - 1000 * 60 * 60 * 1.8).toISOString(),
+      created_at: new Date(Date.now() - 1000 * 60 * 30).toISOString(),
       delivered: true,
-      delivery_ref: "telegram_msg_123"
+      delivery_ref: "telegram_msg_124"
+    }
+  ],
+  diligence_requests: [
+    {
+      request_id: "dil_1",
+      opportunity_id: "opp_101",
+      topic: "Roof age",
+      question: "Can you confirm the age and condition of the roof?",
+      category: "document",
+      source_concern: "Roof Age",
+      status: "answered",
+      created_at: new Date(Date.now() - 1000 * 60 * 60 * 1.8).toISOString(),
+      sent_at: new Date(Date.now() - 1000 * 60 * 60 * 1.8).toISOString(),
+      due_at: new Date(Date.now() - 1000 * 60 * 60 * 0.8).toISOString(),
+      last_follow_up_at: null,
+      follow_up_count: 0,
+      answered_at: new Date(Date.now() - 1000 * 60 * 60 * 1.0).toISOString(),
+      answer_summary: "Roof is 22 years old and requires immediate replacement.",
+      answer_evidence_ids: [],
+      answered_by_document: "doc_1"
+    },
+    {
+      request_id: "dil_2",
+      opportunity_id: "opp_101",
+      topic: "Phase I environmental",
+      question: "Is there a recent Phase I available?",
+      category: "document",
+      source_concern: "Phase I Environmental",
+      status: "sent",
+      created_at: new Date(Date.now() - 1000 * 60 * 60 * 1.8).toISOString(),
+      sent_at: new Date(Date.now() - 1000 * 60 * 60 * 1.8).toISOString(),
+      due_at: new Date(Date.now() - 1000 * 60 * 60 * 0.8).toISOString(),
+      last_follow_up_at: new Date(Date.now() - 1000 * 60 * 60 * 0.5).toISOString(),
+      follow_up_count: 1,
+      answered_at: null,
+      answer_summary: null,
+      answer_evidence_ids: [],
+      answered_by_document: null
+    },
+    {
+      request_id: "dil_3",
+      opportunity_id: "opp_101",
+      topic: "CAM reconciliation",
+      question: "Could you provide the 2024 and 2025 YTD CAM reconciliation?",
+      category: "document",
+      source_concern: "CAM Reconciliation",
+      status: "sent",
+      created_at: new Date(Date.now() - 1000 * 60 * 60 * 1.8).toISOString(),
+      sent_at: new Date(Date.now() - 1000 * 60 * 60 * 1.8).toISOString(),
+      due_at: new Date(Date.now() - 1000 * 60 * 60 * 0.8).toISOString(),
+      last_follow_up_at: null,
+      follow_up_count: 0,
+      answered_at: null,
+      answer_summary: null,
+      answer_evidence_ids: [],
+      answered_by_document: null
+    }
+  ],
+  inbound_messages: [
+    {
+      message_id: "msg_1",
+      opportunity_id: "opp_101",
+      from_address: "broker@example.com",
+      to_address: "acquisitions@dealsieve.com",
+      subject: "Off-market: 8-unit small-bay industrial",
+      body: "Attached OM and rent roll.",
+      date: new Date(Date.now() - 1000 * 60 * 60 * 24 * 7).toISOString(),
+      attachments: [
+        { filename: "om_attachment_1.pdf", content_type: "application/pdf", size_bytes: 1024000 }
+      ],
+      status: "processed",
+      created_at: new Date(Date.now() - 1000 * 60 * 60 * 24 * 7).toISOString()
+    },
+    {
+      message_id: "msg_2",
+      opportunity_id: "opp_101",
+      from_address: "broker@example.com",
+      to_address: "acquisitions@dealsieve.com",
+      subject: "Re: Off-market: 8-unit small-bay industrial",
+      body: "Seller reduced this to $1.25M.",
+      date: new Date(Date.now() - 1000 * 60 * 60 * 2.1).toISOString(),
+      attachments: [],
+      status: "processed",
+      created_at: new Date(Date.now() - 1000 * 60 * 60 * 2.1).toISOString()
+    },
+    {
+      message_id: "msg_3",
+      opportunity_id: "opp_101",
+      from_address: "broker@example.com",
+      to_address: "acquisitions@dealsieve.com",
+      subject: "Re: Off-market: 8-unit small-bay industrial",
+      body: "Here is the inspection report you asked for.",
+      date: new Date(Date.now() - 1000 * 60 * 60 * 1.0).toISOString(),
+      attachments: [
+        { filename: "Power_Inn_Property_Condition_Report.pdf", content_type: "application/pdf", size_bytes: 2048000 }
+      ],
+      status: "processed",
+      created_at: new Date(Date.now() - 1000 * 60 * 60 * 1.0).toISOString()
+    }
+  ],
+  document_analyses: [
+    {
+      analysis_id: "doc_1",
+      opportunity_id: "opp_101",
+      message_id: "msg_3",
+      filename: "Power_Inn_Property_Condition_Report.pdf",
+      document_type: "inspection_report",
+      summary: "Property condition report indicates roof needs replacement and HVAC units are nearing end of life.",
+      findings: [
+        { topic: "Roof condition", value: "End of service life", detail: "Ponding indicates drainage deficiency", severity: "high", confidence: 1.0, page: 3, image_ref: "image 1" },
+        { topic: "Roof condition", value: "Blistering observed", detail: "Multiple areas of blistering", severity: "medium", confidence: 0.9, page: 3, image_ref: "image 2" },
+        { topic: "HVAC", value: "Units from 2001", detail: "R-22 systems", severity: "high", confidence: 1.0, page: 5, image_ref: "image 3" },
+        { topic: "Paving", value: "Alligator cracking", detail: "Deferred maintenance", severity: "low", confidence: 0.8, page: 6, image_ref: null },
+        { topic: "General", value: "Otherwise acceptable", detail: "Structure is sound", severity: "info", confidence: 0.9, page: 1, image_ref: null }
+      ],
+      answers: [
+        { request_topic: "Roof age", answer: "Roof is 22 years old and at the end of its service life.", resolves: true }
+      ],
+      capex_items: [
+        { item: "Roof replacement", low_estimate: 85000, high_estimate: 95000, urgency: "immediate" },
+        { item: "HVAC units", low_estimate: 28000, high_estimate: 36000, urgency: "deferred" },
+        { item: "Paving repair", low_estimate: 6000, high_estimate: 8000, urgency: "deferred" }
+      ],
+      red_flags: [
+        "Roof at end of service life; ponding indicates drainage deficiency",
+        "HVAC units use phased-out R-22 refrigerant"
+      ],
+      images_reviewed: 3,
+      image_paths: ["img1.jpg", "img2.jpg", "img3.jpg"],
+      text_chars: 24000,
+      model_backend: "claude",
+      created_at: new Date(Date.now() - 1000 * 60 * 60 * 0.9).toISOString()
     }
   ]
 };

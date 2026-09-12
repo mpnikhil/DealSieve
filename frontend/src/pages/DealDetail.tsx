@@ -4,6 +4,7 @@ import { ChevronLeft, CheckCircle2, XCircle } from 'lucide-react';
 import { fetchOpportunity, approveDraft, rejectDraft } from '../api';
 import type { OpportunityDetail } from '../types';
 import { StatusPill, cn } from '../components/StatusPill';
+import { DiligencePanel, CorrespondencePanel, DocumentsPanel } from '../components/DealPanels';
 import { formatMoney, formatRate, formatDSCR, formatRelativeTime, formatConstraintLabel } from '../utils/format';
 
 export function DealDetail() {
@@ -47,7 +48,14 @@ export function DealDetail() {
   if (loading) return <div className="p-8 text-slate-500">Loading deal...</div>;
   if (error || !detail) return <div className="p-8 text-red-500">{error || 'Deal not found'}</div>;
 
-  const { opportunity, property, latest_run, events, evidence, skeptic_reports, drafts } = detail;
+  const { opportunity, property, latest_run, events, evidence, skeptic_reports, drafts, diligence_requests, document_analyses, inbound_messages, notifications } = detail;
+  const latestNotification = notifications.length > 0 ? notifications[notifications.length - 1] : null;
+  let attentionReason = "none";
+  if (latestNotification) {
+    if (latestNotification.kind === 'threshold_crossed') attentionReason = "entered REVIEW";
+    else if (latestNotification.kind === 'fell_below_threshold') attentionReason = "fell below threshold";
+    else if (latestNotification.kind === 'diligence_stalled') attentionReason = "diligence stalled";
+  }
 
   return (
     <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8 space-y-6">
@@ -67,7 +75,7 @@ export function DealDetail() {
               <StatusPill status={opportunity.status} />
               {opportunity.human_attention_required && (
                 <span className="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-red-100 text-red-700">
-                  Human attention required
+                  Human attention required: {attentionReason}
                 </span>
               )}
             </div>
@@ -144,7 +152,7 @@ export function DealDetail() {
                         <td className="px-5 py-2.5 font-medium text-slate-700">{row.metric}</td>
                         <td className="px-5 py-2.5 text-right font-mono tabular-nums text-slate-500">{row.broker || '—'}</td>
                         <td className="px-5 py-2.5 text-right font-mono tabular-nums text-slate-900">{row.dealsieve}</td>
-                        <td className="px-5 py-2.5 text-slate-500 text-xs">{row.note}</td>
+                        <td className="px-5 py-2.5 text-slate-500 text-xs whitespace-normal break-words max-w-xs">{row.note}</td>
                       </tr>
                     ))}
                     {latest_run.comparison.length === 0 && (
@@ -191,37 +199,22 @@ export function DealDetail() {
                   </div>
                 ))}
 
-                {drafts.length > 0 && (
-                  <div className="mt-6 pt-6 border-t border-slate-200">
-                    <h3 className="text-sm font-medium text-slate-900 mb-3">Pending Outreach</h3>
-                    {drafts.map(draft => (
-                      <div key={draft.draft_id} className={cn("border rounded-md overflow-hidden", draft.status !== 'pending' ? 'opacity-60 border-slate-200 bg-slate-50' : 'border-blue-200 bg-blue-50/30')}>
-                        <div className="p-4">
-                          <div className="flex justify-between items-center mb-3">
-                            <div className="text-sm font-medium text-slate-900">Subject: {draft.subject}</div>
-                            <span className="text-xs font-medium uppercase tracking-wider text-slate-500">{draft.status}</span>
-                          </div>
-                          <ul className="list-disc list-inside text-sm text-slate-700 space-y-1 mb-4">
-                            {draft.questions.map((q, i) => <li key={i}>{q}</li>)}
-                          </ul>
-                          {draft.status === 'pending' && (
-                            <div className="flex gap-2">
-                              <button onClick={() => handleDraftAction(draft.draft_id, 'approve')} className="px-3 py-1.5 bg-blue-600 text-white text-sm font-medium rounded hover:bg-blue-700 transition">
-                                Approve Draft
-                              </button>
-                              <button onClick={() => handleDraftAction(draft.draft_id, 'reject')} className="px-3 py-1.5 bg-white border border-slate-300 text-slate-700 text-sm font-medium rounded hover:bg-slate-50 transition">
-                                Reject
-                              </button>
-                            </div>
-                          )}
-                        </div>
-                      </div>
-                    ))}
-                  </div>
-                )}
+
               </div>
             </div>
           )}
+
+          {/* New Panels */}
+          <DiligencePanel requests={diligence_requests || []} />
+          
+          <CorrespondencePanel 
+            inbound={inbound_messages || []} 
+            outbound={drafts || []} 
+            onApprove={(id) => handleDraftAction(id, 'approve')} 
+            onReject={(id) => handleDraftAction(id, 'reject')} 
+          />
+          
+          <DocumentsPanel docs={document_analyses || []} />
 
           {/* Evidence */}
           <div className="bg-white border border-slate-200 rounded-lg overflow-hidden shadow-sm">
