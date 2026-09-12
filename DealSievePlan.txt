@@ -1,5 +1,0 @@
-This file was removed at the request of the repository owner (mpnikhil) on 2026-09-12.
-
-The original file content is preserved in the repository history and can be recovered from earlier commits if needed.
-
-If you want the file fully deleted from the repository history (force removal from all commits), that requires a rewrite of history (git filter-repo or BFG) and should be done locally with caution. I can provide step-by-step instructions for that if desired.

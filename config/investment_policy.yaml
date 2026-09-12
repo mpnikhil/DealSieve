@@ -1,0 +1,51 @@
+# DealSieve immutable investment policy.
+# Agents may READ this file. Agents may never modify it.
+# Every underwriting run records the policy_version (content hash) it was evaluated under.
+version: 1
+name: "Small-bay industrial, Sacramento region, $500k equity"
+
+capital:
+  acquisition_equity: 500000      # total cash available for the acquisition
+  reserve_min: 50000              # never deploy below this reserve
+  reserve_target: 75000           # reserves held back; deployable equity = acquisition_equity - reserve_target
+
+purchase:
+  preferred_min: 1100000
+  preferred_max: 1700000
+  absolute_max: 2000000           # hard gate (price_dependent)
+
+property:
+  target_type: small_bay_industrial
+  tenant_count_min: 5             # hard gate (structural)
+  largest_tenant_pct_max: 0.25    # hard gate (structural): share of gross rent from the largest tenant
+  preferred_suite_sqft:
+    min: 1000
+    max: 5000
+
+underwriting:
+  min_normalized_cap_rate: 0.08   # hard gate (price_dependent)
+  min_base_dscr: 1.35             # hard gate (price_dependent)
+
+financing:
+  assumed_interest_rate: 0.07
+  amortization_years: 25
+  max_ltv: 0.75                   # hard gate (price_dependent): loan / purchase_price
+  closing_cost_pct: 0.02          # of purchase price, paid from equity
+
+normalization:
+  management_fee_pct: 0.05        # of effective gross income, always charged even if self-managed
+  normalized_vacancy_pct: 0.05    # of gross potential rent, floor; use stated vacancy if higher
+  require_property_tax_reset: true
+  property_tax_rate_pct: 0.0125   # of purchase price (CA reassessment incl. direct levies)
+  require_capex_reserve: true
+  capex_reserve_per_sqft: 0.25    # annual, per building sqft
+  min_insurance_per_sqft: 0.35    # floor; use stated insurance if higher
+  min_repairs_pct_of_egi: 0.05    # floor; use stated R&M if higher
+
+stress:
+  vacancy_pct: 0.20
+  rent_haircut_pct: 0.10
+  min_stress_dscr: 1.00           # informational, not a gate
+
+classification:
+  near_threshold_pct: 0.05        # NEAR if asking price is within 5% of max viable price

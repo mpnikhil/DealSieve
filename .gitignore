@@ -1,0 +1,27 @@
+# python
+.venv/
+__pycache__/
+*.pyc
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+dist/
+build/
+# runtime data
+data/*.db
+data/*.db-journal
+data/raw/
+*.log
+.env
+.env.*
+!.env.example
+# frontend
+frontend/node_modules/
+frontend/dist/
+# os / editors
+.DS_Store
+.idea/
+.vscode/
+# agentcore build artifacts
+.bedrock_agentcore.yaml
+.bedrock_agentcore/
