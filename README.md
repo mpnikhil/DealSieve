@@ -1,6 +1,6 @@
 # DealSieve
 
-**A persistent acquisition agent that rejects deals, remembers why, computes what would change the decision, and interrupts you when that happens.**
+**The acquisitions agent for small-bay industrial buyers. It underwrites every broker OM on your numbers, keeps a clearing price on every pass and re-underwrites when the facts change, and works the deals that clear through diligence. You keep the money decisions.**
 
 Built with the [Strands Agents SDK](https://strandsagents.com/) for the AWS *Agents for Humans* hackathon (Professional Agents track). Deployed to Bedrock AgentCore Runtime; runs fully offline too. 491 tests.
 

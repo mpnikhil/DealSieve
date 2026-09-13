@@ -2,15 +2,17 @@
 
 ## Tagline
 
-Rejects deals, remembers why, and interrupts you when the decision changes.
+The acquisitions agent for small-bay industrial buyers. It works the pipeline; you price the basis.
 
 ## Elevator pitch
 
-DealSieve is a persistent acquisition agent for commercial real estate buyers. It reads incoming broker emails and underwrites deals against a frozen investment policy. When a deal is rejected, it computes the price at which the decision would change and monitors the thread for updates. If a subsequent email meets those conditions, DealSieve re-underwrites the property, runs an independent skeptic pass, and alerts a human. Most deals fail the policy and remain silent.
+DealSieve is the acquisitions agent for small-bay light industrial buyers. It underwrites every broker offering memorandum on the buyer's own numbers, with the Prop 13 tax reset, real vacancy and reserves. It stores the clearing price on every pass and re-underwrites the day the price or the facts change. It runs the diligence chase for roof condition, Phase I and CAM reconciliations, reads the inspection report and re-prices the basis. The principal keeps the money decisions.
 
 ## Inspiration
 
-Most AI tools in commercial real estate focus on reading documents or extracting rent rolls faster to increase the volume of deals a human can review. We focused instead on attention allocation and state persistence. A deal correctly rejected today is often forgotten, even if the price drops six weeks later to a viable level. We built an agent that holds a standing, evidence-backed opinion on every opportunity and requests attention when that opinion changes.
+We receive dozens of offering memorandums every month for concrete tilt-up buildings. Almost every off-market email pitches an aggressive pro forma. The broker assumes zero vacancy and applies the seller's old tax bill. We spend hours tearing down those numbers to find the actual cap rate. Our process requires adding a management fee alongside a realistic capex reserve. We then model the Prop 13 tax reset just to see if the property clears our debt coverage floor. Most deals get passed on within the hour, and a pass is only "not at this price"; nobody has the hours to re-run fifty old passes when a seller cuts a price.
+
+When a building finally clears our underwriting, the diligence phase begins. Chasing down the property condition report to check for ponding on the flat built-up roof takes days. Then we need the Phase I assessment to identify environmental risk from automotive tenants. Drafting emails to verify CAM reconciliations and review lease rollover schedules consumes the rest of the week. We built DealSieve to do the triage, hold a price on every pass, and manage the follow-up questions. Our team now spends its time pricing the basis.
 
 ## What it does
 

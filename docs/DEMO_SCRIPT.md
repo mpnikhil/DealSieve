@@ -14,7 +14,7 @@ live model call working on the day of the recording.
 **Screen:** title card or empty terminal.
 
 **Voice-over:**
-> "Acquisition professionals don't need another AI that reads offering memorandums faster. They need an agent that decides which opportunities deserve their attention in the first place — and remembers the ones it turned down."
+> "An email hit my inbox pitching a multi-tenant small-bay building at a million five-fifty. The pro forma assumed zero vacancy, no management fee and the seller's old tax bill. On our numbers it missed both the cap rate and the debt coverage floor, so I passed. DealSieve is the acquisitions agent we built to qualify every OM on our numbers, hold the clearing price on every pass, and run the diligence chase, so I only step in for the money decisions. Here is that building, start to finish."
 
 ---
 
