@@ -78,15 +78,13 @@ def test_fixture_05_through_real_codex_with_images_reviews_photos(tmp_path, poli
     from dealsieve.persistence import Repo
     from dealsieve.pipeline import process_inbound
 
-    os.environ["DEALSIEVE_MODEL_BACKEND"] = "cli"
-    os.environ["DEALSIEVE_CLI_PROVIDER"] = "codex"
-
     repo = Repo(tmp_path / "live.db")
     repo.init_schema()
     notifier = RecordingNotifier()
     outbox = RecordingOutbox()
 
-    # Pre-seed through scripted backend so deal is in REVIEW with open diligence requests
+    # Pre-seed through the scripted backend so the deal is in REVIEW with a pending information request
+    os.environ["DEALSIEVE_MODEL_BACKEND"] = "scripted"
     for stem in ("01_initial_offer", "02_price_drop"):
         msg = parse_eml(ROOT / "fixtures" / "emails" / f"{stem}.eml")
         process_inbound(
@@ -100,10 +98,13 @@ def test_fixture_05_through_real_codex_with_images_reviews_photos(tmp_path, poli
 
     opps = repo.list_opportunities()
     opp = opps[0]
-    drafts = repo.list_drafts(opp.opportunity_id)
+    drafts = repo.list_drafts(opportunity_id=opp.opportunity_id)
     pending = next(d for d in drafts if d.status == "pending")
     approve_and_send(pending.draft_id, repo=repo, policy=policy, outbox=outbox)
 
+    # Now the real thing: the inspection report through codex with the photos attached
+    os.environ["DEALSIEVE_MODEL_BACKEND"] = "cli"
+    os.environ["DEALSIEVE_CLI_PROVIDER"] = "codex"
     msg5 = parse_eml(ROOT / "fixtures" / "emails" / "05_inspection_report.eml")
     outcome = process_inbound(msg5, repo=repo, policy=policy, notifier=notifier, outbox=outbox, script=None)
 
