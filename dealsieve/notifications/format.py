@@ -151,15 +151,19 @@ def format_threshold_alert(
     )
 
 
-def _finding_line(analysis: DocumentAnalysis) -> str | None:
+def _finding_lines(analysis: DocumentAnalysis, limit: int = 3, width: int = 96) -> list[str]:
+    """One short bullet per finding, most severe first. Telegram-friendly: no run-on lines."""
     if not analysis.findings:
-        return analysis.summary or None
+        return [f"- {analysis.summary}"] if analysis.summary else []
     rank = {"high": 0, "medium": 1, "low": 2, "info": 3}
-    findings = sorted(analysis.findings, key=lambda finding: rank[finding.severity])[:3]
-    return "; ".join(
-        f"{finding.topic}: {finding.value}" + (f", {finding.detail}" if finding.detail else "")
-        for finding in findings
-    )
+    findings = sorted(analysis.findings, key=lambda finding: rank[finding.severity])[:limit]
+    lines = []
+    for finding in findings:
+        text = f"- {finding.topic}: {finding.value}".rstrip(".")
+        if len(text) > width:
+            text = text[: width - 3].rstrip() + "..."
+        lines.append(text)
+    return lines
 
 
 def format_fell_below_alert(
@@ -174,9 +178,9 @@ def format_fell_below_alert(
     """Build the alert emitted when diligence moves a REVIEW deal back below threshold."""
     lines: list[str] = [opportunity.display_name]
     if analysis is not None:
-        finding = _finding_line(analysis)
-        if finding:
-            lines.extend(["", f"Diligence established: {finding}"])
+        bullets = _finding_lines(analysis)
+        if bullets:
+            lines.extend(["", f"Diligence established ({analysis.images_reviewed} photos reviewed):", *bullets])
         immediate = sum(
             (item.midpoint for item in analysis.capex_items if item.urgency in {"immediate", "near_term"}),
             Decimal("0"),

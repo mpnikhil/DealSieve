@@ -81,7 +81,7 @@ export function DiligencePanel({ requests }: { requests: DiligenceRequest[] }) {
 
 export function CorrespondencePanel({ inbound, outbound, onApprove, onReject }: { inbound: InboundMessage[], outbound: OutboundDraft[], onApprove: (id: string) => void, onReject: (id: string) => void }) {
   const items = [
-    ...inbound.map(i => ({ type: 'in', date: i.created_at, data: i })),
+    ...inbound.map(i => ({ type: 'in', date: i.received_at, data: i })),
     ...outbound.map(o => ({ type: 'out', date: o.created_at, data: o }))
   ].sort((a, b) => new Date(a.date).getTime() - new Date(b.date).getTime());
 
@@ -121,10 +121,10 @@ function InboundItem({ msg }: { msg: InboundMessage }) {
     <div>
       <div className="flex justify-between items-start mb-2">
         <div>
-          <div className="text-sm font-semibold text-slate-900">{msg.from_address}</div>
+          <div className="text-sm font-semibold text-slate-900">{msg.sender_name ? `${msg.sender_name} <${msg.sender ?? ''}>` : (msg.sender ?? 'unknown sender')}</div>
           <div className="text-sm text-slate-700">{msg.subject}</div>
         </div>
-        <div className="text-xs text-slate-500">{formatRelativeTime(msg.date)}</div>
+        <div className="text-xs text-slate-500">{formatRelativeTime(msg.received_at)}</div>
       </div>
       {msg.attachments.length > 0 && (
         <div className="flex flex-wrap gap-2 mb-3">
@@ -137,8 +137,8 @@ function InboundItem({ msg }: { msg: InboundMessage }) {
         </div>
       )}
       <div className="text-sm text-slate-600 whitespace-pre-wrap">
-        {expanded ? msg.body : (msg.body.length > 150 ? msg.body.substring(0, 150) + '...' : msg.body)}
-        {msg.body.length > 150 && (
+        {expanded ? msg.body_text : (msg.body_text.length > 150 ? msg.body_text.substring(0, 150) + '...' : msg.body_text)}
+        {msg.body_text.length > 150 && (
           <button onClick={() => setExpanded(!expanded)} className="text-blue-600 hover:underline ml-2 text-xs">
             {expanded ? 'Show less' : 'Read more'}
           </button>
@@ -260,7 +260,7 @@ export function DocumentsPanel({ docs }: { docs: DocumentAnalysis[] }) {
                         )}
                       </div>
                       <div className="text-sm font-mono text-slate-700">
-                        ${item.low_estimate.toLocaleString()} - ${item.high_estimate.toLocaleString()}
+                        ${item.low.toLocaleString()} - ${item.high.toLocaleString()}
                       </div>
                     </div>
                   );

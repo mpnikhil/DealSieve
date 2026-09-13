@@ -301,9 +301,12 @@ export interface DiligenceRequest {
 
 export interface CapexItem {
   item: string;
-  low_estimate: number;
-  high_estimate: number;
-  urgency: 'immediate' | 'near_term' | 'deferred' | 'routine';
+  low: number;
+  high: number;
+  urgency: 'immediate' | 'near_term' | 'deferred';
+  source_document: string;
+  location: string | null;
+  evidence_id: string | null;
 }
 
 export interface DocumentFinding {
@@ -343,20 +346,26 @@ export interface DocumentAnalysis {
 export interface Attachment {
   filename: string;
   content_type: string;
+  sha256?: string;
   size_bytes: number;
+  text?: string | null;
+  stored_path?: string | null;
+  image_paths?: string[];
 }
 
 export interface InboundMessage {
   message_id: string;
-  opportunity_id: string | null;
-  from_address: string;
-  to_address: string;
-  subject: string;
-  body: string;
-  date: string;
+  channel: string;
+  received_at: string;
+  sender: string | null;
+  sender_name: string | null;
+  subject: string | null;
+  body_text: string;
   attachments: Attachment[];
-  status: 'received' | 'processed' | 'failed' | 'ignored';
-  created_at: string;
+  urls: string[];
+  in_reply_to: string | null;
+  thread_id: string | null;
+  raw_ref: string | null;
 }
 
 export interface OpportunityDetail {

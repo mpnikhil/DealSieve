@@ -685,43 +685,49 @@ export const mockOpportunityDetail: OpportunityDetail = {
   inbound_messages: [
     {
       message_id: "msg_1",
-      opportunity_id: "opp_101",
-      from_address: "broker@example.com",
-      to_address: "acquisitions@dealsieve.com",
+      channel: "email",
+      sender: "maya.chen@brokerage.example",
+      sender_name: "Maya Chen",
       subject: "Off-market: 8-unit small-bay industrial",
-      body: "Attached OM and rent roll.",
-      date: new Date(Date.now() - 1000 * 60 * 60 * 24 * 7).toISOString(),
+      body_text: "Attached OM and rent roll.",
+      received_at: new Date(Date.now() - 1000 * 60 * 60 * 24 * 7).toISOString(),
       attachments: [
         { filename: "om_attachment_1.pdf", content_type: "application/pdf", size_bytes: 1024000 }
       ],
-      status: "processed",
-      created_at: new Date(Date.now() - 1000 * 60 * 60 * 24 * 7).toISOString()
+      urls: [],
+      in_reply_to: null,
+      thread_id: null,
+      raw_ref: null
     },
     {
       message_id: "msg_2",
-      opportunity_id: "opp_101",
-      from_address: "broker@example.com",
-      to_address: "acquisitions@dealsieve.com",
+      channel: "email",
+      sender: "maya.chen@brokerage.example",
+      sender_name: "Maya Chen",
       subject: "Re: Off-market: 8-unit small-bay industrial",
-      body: "Seller reduced this to $1.25M.",
-      date: new Date(Date.now() - 1000 * 60 * 60 * 2.1).toISOString(),
+      body_text: "Seller reduced this to $1.25M.",
+      received_at: new Date(Date.now() - 1000 * 60 * 60 * 2.1).toISOString(),
       attachments: [],
-      status: "processed",
-      created_at: new Date(Date.now() - 1000 * 60 * 60 * 2.1).toISOString()
+      urls: [],
+      in_reply_to: null,
+      thread_id: null,
+      raw_ref: null
     },
     {
       message_id: "msg_3",
-      opportunity_id: "opp_101",
-      from_address: "broker@example.com",
-      to_address: "acquisitions@dealsieve.com",
+      channel: "email",
+      sender: "maya.chen@brokerage.example",
+      sender_name: "Maya Chen",
       subject: "Re: Off-market: 8-unit small-bay industrial",
-      body: "Here is the inspection report you asked for.",
-      date: new Date(Date.now() - 1000 * 60 * 60 * 1.0).toISOString(),
+      body_text: "Here is the inspection report you asked for.",
+      received_at: new Date(Date.now() - 1000 * 60 * 60 * 1.0).toISOString(),
       attachments: [
         { filename: "Power_Inn_Property_Condition_Report.pdf", content_type: "application/pdf", size_bytes: 2048000 }
       ],
-      status: "processed",
-      created_at: new Date(Date.now() - 1000 * 60 * 60 * 1.0).toISOString()
+      urls: [],
+      in_reply_to: null,
+      thread_id: null,
+      raw_ref: null
     }
   ],
   document_analyses: [
@@ -743,9 +749,9 @@ export const mockOpportunityDetail: OpportunityDetail = {
         { request_topic: "Roof age", answer: "Roof is 22 years old and at the end of its service life.", resolves: true }
       ],
       capex_items: [
-        { item: "Roof replacement", low_estimate: 85000, high_estimate: 95000, urgency: "immediate" },
-        { item: "HVAC units", low_estimate: 28000, high_estimate: 36000, urgency: "deferred" },
-        { item: "Paving repair", low_estimate: 6000, high_estimate: 8000, urgency: "deferred" }
+        { item: "Roof replacement", low: 85000, high: 95000, urgency: "immediate", source_document: "Power_Inn_Property_Condition_Report.pdf", location: "page 4", evidence_id: null },
+        { item: "HVAC units", low: 28000, high: 36000, urgency: "deferred", source_document: "Power_Inn_Property_Condition_Report.pdf", location: "page 5", evidence_id: null },
+        { item: "Paving repair", low: 6000, high: 8000, urgency: "deferred", source_document: "Power_Inn_Property_Condition_Report.pdf", location: "page 6", evidence_id: null }
       ],
       red_flags: [
         "Roof at end of service life; ponding indicates drainage deficiency",
