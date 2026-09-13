@@ -325,8 +325,13 @@ def build_command(
             "-o",
             str(output_path),
         ]
-        for path in _write_images(images, workdir):
+        image_paths = _write_images(images, workdir)
+        for path in image_paths:
             argv += ["-i", str(path)]
+        if image_paths:
+            # `-i` is variadic: a positional prompt after it is swallowed as another image path and
+            # codex then reads an empty stdin. With images, the prompt travels on stdin instead.
+            return CLICommand(argv=argv, stdin_text=prompt, output_file=output_path)
         argv.append(prompt)
         return CLICommand(argv=argv, stdin_text=None, output_file=output_path)
 
