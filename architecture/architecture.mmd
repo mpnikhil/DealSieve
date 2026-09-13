@@ -20,8 +20,10 @@ flowchart TD
         MP["Model provider\nCLIModel · BedrockModel · AnthropicModel · ScriptedModel\n(swapped by env var, zero code change)"]
         AA["Acquisition Agent\nextracts claims with provenance,\nfollows a fixed tool-call procedure"]
         SK["Skeptic Agent\nindependent second opinion,\nstructured_output_model=SkepticOutput"]
+        INSP["Inspector Agent\nmultimodal: text + photos"]
         AA -.uses.- MP
         SK -.uses.- MP
+        INSP -.uses.- MP
     end
 
     IM --> AA
@@ -30,19 +32,28 @@ flowchart TD
         RC["record_claims\nidentity resolve + evidence store + reconcile"]
         UW["underwrite\ndeterministic finance engine\n+ immutable policy + viability solver"]
         RSR["request_skeptic_review\n(only when status = REVIEW)"]
-        DBQ["draft_broker_questions\n(only after a skeptic report)"]
-        NH["notify_human\n(only on a threshold crossing, once)"]
+        DBQ["request_diligence\n(only after a skeptic report)"]
+        DIL["Diligence Loop\nrequest_diligence -> DiligenceRequest\nfollow-up scheduler · match answers\nimmediate capex -> re-underwrite"]
+        OBX["Outbox\nfile / SMTP / SES\npolicy screen"]
+        NH["notify_human\n(threshold crossing, or diligence stalled)"]
     end
 
     AA -->|"tool call"| RC --> UW --> RSR
+    AA -.->|"analyze_document"| INSP
+    INSP -->|"resolves"| DIL
     RSR -->|invokes| SK
-    SK -->|verdict + concerns| DBQ --> NH
+    SK -->|verdict + concerns| DBQ --> DIL
+    DIL --> OBX
+    DIL --> NH
+    DBQ --> NH
 
     DB[("SQLite\nimmutable events · immutable underwriting runs\nderived opportunity state")]
     RC --> DB
     UW --> DB
     RSR --> DB
     DBQ --> DB
+    DIL --> DB
+    OBX --> DB
     NH --> DB
 
     subgraph OUT["Interfaces"]
@@ -53,18 +64,18 @@ flowchart TD
     NH --> ALERT
 
     subgraph HUM["Human"]
-        H["Investor\nreviews the alert,\napproves or rejects the draft"]
+        H["Investor\nreviews the alert,\napprove first message; money always"]
     end
     DASH --> H
     ALERT --> H
-    H -.approve / reject.-> DBQ
+    H -.approve / reject.-> OBX
 
     classDef llm fill:#efe4ff,stroke:#7c4dff,color:#3d1a8f;
     classDef det fill:#e0f2ff,stroke:#2f7ed8,color:#0d3a66;
     classDef human fill:#fff1d6,stroke:#e08a00,color:#6b4400;
     classDef store fill:#eeeeee,stroke:#666666,color:#222222;
 
-    class MP,AA,SK llm;
-    class RC,UW,RSR,DBQ,NH det;
+    class MP,AA,SK,INSP llm;
+    class RC,UW,RSR,DBQ,DIL,OBX,NH det;
     class H human;
     class DB store;

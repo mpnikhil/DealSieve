@@ -290,7 +290,7 @@ export function DocumentsPanel({ docs }: { docs: DocumentAnalysis[] }) {
                     {f.detail && <div className="text-xs text-slate-500 mb-2">{f.detail}</div>}
                     <div className="flex gap-2 text-xs text-slate-400 font-mono">
                       {f.page !== null && <span>Page {f.page}</span>}
-                      {f.image_ref && <span>Ref: {f.image_ref}</span>}
+                      {f.image_ref && <span>Photo {doc.image_paths.indexOf(f.image_ref) >= 0 ? doc.image_paths.indexOf(f.image_ref) + 1 : f.image_ref.replace(/^image\s*/i, '')}</span>}
                     </div>
                   </div>
                 ))}
