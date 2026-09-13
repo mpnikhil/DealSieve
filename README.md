@@ -1,6 +1,6 @@
 # DealSieve
 
-**A persistent acquisition agent that rejects deals, remembers exactly why, computes what would change its mind, and interrupts you only when that happens.**
+**A persistent acquisition agent that rejects deals, remembers why, computes what would change the decision, and interrupts you when that happens.**
 
 Built with the [Strands Agents SDK](https://strandsagents.com/) for the AWS *Agents for Humans* hackathon (Professional Agents track). Deployed to Bedrock AgentCore Runtime; runs fully offline too. 366 tests.
 
@@ -19,9 +19,9 @@ Three interruptions across the life of a deal, each because the decision changed
 
 ## Why this is not another document-reading copilot
 
-- **A standing opinion, not a summary.** Every opportunity is a permanent record with an immutable event history and immutable underwriting runs.
-- **A counterfactual, not a verdict.** For every rejection DealSieve solves for the exact price at which every gate would pass and names the binding constraint. "Not now, and here is the number."
-- **Silence is the product.** Rejecting 71 of 84 deals produces zero notifications. You hear from it when a monitored condition flips the answer, when diligence changes the answer back, or when the broker stops answering.
+- **A standing opinion.** Every opportunity is a permanent record with an immutable event history and immutable underwriting runs.
+- **A calculated counterfactual.** For every rejection, DealSieve solves for the price at which every gate would pass and names the binding constraint.
+- **Minimal notifications.** Rejecting 71 of 84 deals produces zero notifications. You hear from it when a monitored condition changes the answer, when diligence alters the result, or when the broker stops answering.
 
 ## How it works
 
@@ -103,7 +103,7 @@ flowchart TD
     class DB store;
 ```
 
-**Where the model has discretion, and where it does not.** The Strands agents do the work no code can do: read a messy email, a 40-page OM or a condition report with photos, decide which numbers are claims, cite the page or photo each came from, judge which claims are unsupported and material. Everything after that is code: the tool order is fixed, every gate lives in the tool body, a safety net performs any step the model skips, the credit amount is frontier arithmetic, and the diligence questions are reconciled against the Skeptic's own list. If the model called nothing after extraction, the outcome would be identical. The *system* is the agent; the LLM inside is a constrained perception-and-judgment component by design.
+**Model discretion vs. deterministic code.** The Strands agents perform tasks that require judgment, such as reading a messy email, a 40-page OM, or a condition report with photos. They identify claims, cite the page or photo for each, and determine which claims are unsupported and material. All subsequent steps are executed by code. The tool order is fixed, every gate evaluates within the tool body, and a safety net runs any step the model skips. The credit amount is determined by frontier arithmetic, and diligence questions are reconciled against the Skeptic's list. If the model called no tools after extraction, the outcome would be identical. The system acts as the agent, with the LLM serving as a perception and judgment component.
 
 - **Acquisition Agent** (`dealsieve/agents/acquisition.py`): a Strands `Agent` whose tools are the deterministic steps: `record_claims`, `analyze_document`, `underwrite`, `request_skeptic_review`, `request_diligence`, `request_price_adjustment`, `notify_human`.
 - **Skeptic Agent** (`agents/skeptic.py`): independent, no tools, `structured_output_model`. Argues that the numbers rest on unverified claims; never recomputes finance.
@@ -118,8 +118,8 @@ flowchart TD
 | Policy is immutable at runtime | Agents read `config/investment_policy.yaml`; every run records the policy's content hash |
 | Nothing involving money or terms leaves without a human | Every outbound message passes a deterministic screen (price, credit, deposit, contingency, financing, LOI, PSA); approval is loopback-or-token gated, compare-and-set, one Message-ID per draft |
 | The first diligence message waits for one-tap approval; follow-ups on an approved thread are automatic and capped | `outreach` policy; requests are reserved atomically before transport and re-checked for answers |
-| Capex from a document is verified, not believed | Both ends of a proposed range must appear in the document's own text; verified items are aggregated across documents; rejects are recorded |
-| Diligence questions come from the Skeptic, not from the email | Server-side reconciliation of the model's items against the Skeptic's questions; unmatched items dropped |
+| Capex from a document is verified by text evidence | Both ends of a proposed range must appear in the document's own text; verified items are aggregated across documents; rejects are recorded |
+| Diligence questions originate from the Skeptic | Server-side reconciliation of the model's items against the Skeptic's questions; unmatched items dropped |
 | One delivered alert per deal, run and kind, and alerts report delivery truthfully | Notification intent persisted with a dedupe key before delivery; resumed on retry if delivery failed |
 | History is append-only; messages are processed once | Immutable events and runs; message claim/complete/fail states; duplicates are no-ops |
 | A "Re:" subject line can never re-set a price | Reconciliation ignores an asking price without body or attachment evidence |
