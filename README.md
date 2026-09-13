@@ -2,7 +2,7 @@
 
 **A persistent acquisition agent that rejects deals, remembers why, computes what would change the decision, and interrupts you when that happens.**
 
-Built with the [Strands Agents SDK](https://strandsagents.com/) for the AWS *Agents for Humans* hackathon (Professional Agents track). Deployed to Bedrock AgentCore Runtime; runs fully offline too. 366 tests.
+Built with the [Strands Agents SDK](https://strandsagents.com/) for the AWS *Agents for Humans* hackathon (Professional Agents track). Deployed to Bedrock AgentCore Runtime; runs fully offline too. 467 tests.
 
 ## The story, with real numbers
 
@@ -110,6 +110,12 @@ flowchart TD
 - **Inspector Agent** (`agents/inspector.py`): multimodal. Text and embedded photos in, findings with page/photo provenance and capex proposals out.
 - **Model providers** (`dealsieve/models/`): `CLIModel`, a custom Strands provider that runs `claude`, `codex` or `agy` as the LLM on existing subscriptions; `ScriptedModel` for deterministic offline runs and tests; Strands' `BedrockModel` and `AnthropicModel` by environment variable.
 
+## What it remembers about you
+
+Every decision you make is recorded as a memory and read back by the agents on the next deal: an approval, a rejection with the reason you typed, an alert you ignored, and how each broker behaves (who answers in three days, who goes silent after two follow-ups). The Skeptic sees "what this investor decided before" when it chooses what to chase, a credit request's rationale notes the last similar ask you approved or rejected, and alerts end with a "You previously:" line when a strong match exists. Memory never changes a number: prices, frontiers, capex and gate results come from the ledger and the engine.
+
+The store is `dealsieve/memory/`. `DEALSIEVE_MEMORY=local` (default) keeps it in SQLite with deterministic recall; `DEALSIEVE_MEMORY=agentcore` writes through to Amazon Bedrock AgentCore Memory (`AGENTCORE_MEMORY_ID` or a memory created on first use) and falls back to local if AWS is unreachable. Browse it at `/memory` in the dashboard, `GET /api/memory`, or `dealsieve memory --q "roof credit"`.
+
 ## Guarantees enforced in code
 
 | Guarantee | Mechanism |
@@ -131,7 +137,7 @@ The state machine, its invariants and the trace explorer that checks them are in
 ```bash
 make setup            # Python 3.12 venv via uv
 cp .env.example .env
-make test             # 366 deterministic tests, no model calls
+make test             # 467 deterministic tests, no model calls
 make demo-offline     # acts 1 and 2 with the scripted model, ~3 s; ends with the request awaiting approval
 make frontend && PORT=8010 make api   # dashboard at http://localhost:8010
 ```
