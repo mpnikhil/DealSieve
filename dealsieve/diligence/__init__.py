@@ -8,15 +8,24 @@ for a fresh human approval.
 
 from __future__ import annotations
 
+import logging
 import re
 from collections import defaultdict
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from dataclasses import asdict, dataclass
 from datetime import datetime, timedelta
 from decimal import Decimal
 from hashlib import sha256
-from typing import Any
+from typing import Any, Literal
 
+from dealsieve.memory import (
+    MemoryStore,
+    document_kind_label,
+    get_memory_store,
+    remember_alert_acknowledgement,
+    remember_broker_outcome,
+    remember_decision,
+)
 from dealsieve.notifications import format_stalled_alert
 from dealsieve.persistence import DuplicateNotification, Repo
 from dealsieve.policy import InvestmentPolicy
@@ -75,6 +84,18 @@ _FAMILIES: tuple[frozenset[str], ...] = (
     frozenset({"zoning", "zone"}),
     frozenset({"parking", "paving", "pavement"}),
 )
+
+logger = logging.getLogger(__name__)
+
+
+def _safe_remember(action: str, fn: Callable[[], Any]) -> None:
+    """Decision-memory recording is additive: a failure here (e.g. a legacy Repo double that
+    predates the memory_events table, or an AgentCore backend degrading) must never break the
+    primary diligence flow it is describing."""
+    try:
+        fn()
+    except Exception as exc:  # noqa: BLE001 -- deliberately broad: memory is best-effort here.
+        logger.warning("Decision memory recording failed (%s); continuing without it: %s", action, exc)
 
 
 def classify_outbound_text(text: str) -> OutboundKind:
@@ -367,8 +388,20 @@ class DraftNotPending(ValueError):
     """Raised when a draft cannot be claimed for an explicit approval/send attempt."""
 
 
-def acknowledge_opportunity(opportunity_id: str, *, repo: Repo, principal: str) -> Opportunity:
-    """Clear the human-attention latch and append the auditable acknowledgement NOTE (F25)."""
+def acknowledge_opportunity(
+    opportunity_id: str,
+    *,
+    repo: Repo,
+    principal: str,
+    memory: MemoryStore | None = None,
+    notification: Notification | None = None,
+    action: Literal["ignore", "review"] = "ignore",
+) -> Opportunity:
+    """Clear the human-attention latch and append the auditable acknowledgement NOTE (F25).
+
+    When ``notification`` is given (the ignore/review acknowledgement path), also records an "alert"
+    memory of the human dismissing or opening it, e.g. "Ignored the fell-below alert on deal #113."
+    """
     opportunity = repo.get_opportunity(opportunity_id)
     if opportunity is None:
         raise LookupError(f"No opportunity {opportunity_id!r}")
@@ -383,6 +416,18 @@ def acknowledge_opportunity(opportunity_id: str, *, repo: Repo, principal: str) 
             payload={"principal": principal},
         )
     )
+    if notification is not None:
+        _safe_remember(
+            "alert",
+            lambda: remember_alert_acknowledgement(
+                memory or get_memory_store(repo),
+                principal=principal,
+                opportunity=acknowledged,
+                notification_id=notification.notification_id,
+                notification_kind=notification.kind,
+                action=action,
+            ),
+        )
     return acknowledged
 
 
@@ -392,11 +437,13 @@ def reject_draft(
     repo: Repo,
     principal: str,
     reason: str | None = None,
+    memory: MemoryStore | None = None,
 ) -> OutboundDraft:
     """CAS-reject one pending draft and withdraw its still-draft requests (F2/F3)."""
     draft = repo.get_draft(draft_id)
     if draft is None:
         raise LookupError(f"No draft {draft_id!r}")
+    memory = memory or get_memory_store(repo)
     if not repo.transition_draft(draft_id, "pending", "rejected"):
         current = repo.get_draft(draft_id)
         current_status = current.status if current is not None else "missing"
@@ -411,6 +458,19 @@ def reject_draft(
         f"Human rejected broker draft {draft_id}" + (f": {reason}" if reason else ""),
         principal=principal,
     )
+    opportunity = repo.get_opportunity(rejected.opportunity_id)
+    if opportunity is not None:
+        _safe_remember(
+            "reject",
+            lambda: remember_decision(
+                memory,
+                principal=principal,
+                draft=rejected,
+                opportunity=opportunity,
+                outcome="rejected",
+                reason=reason,
+            ),
+        )
     for request_id in rejected.request_ids:
         request = repo.get_diligence_request(request_id)
         if request is None or request.status != "draft":
@@ -431,7 +491,7 @@ def reject_draft(
                 },
             )
         )
-    acknowledge_opportunity(rejected.opportunity_id, repo=repo, principal=principal)
+    acknowledge_opportunity(rejected.opportunity_id, repo=repo, principal=principal, memory=memory)
     return rejected
 
 
@@ -443,14 +503,16 @@ def approve_and_send(
     outbox: Any,
     principal: str = "human:explicit",
     acknowledge: bool = True,
+    memory: MemoryStore | None = None,
 ) -> OutboundDraft:
     """Atomically claim an explicit approval, deliver once, and apply post-send effects."""
     draft = repo.get_draft(draft_id)
     if draft is None:
         raise LookupError(f"No draft {draft_id!r}")
+    memory = memory or get_memory_store(repo)
     if draft.status == "sent":
         if acknowledge:
-            acknowledge_opportunity(draft.opportunity_id, repo=repo, principal=principal)
+            acknowledge_opportunity(draft.opportunity_id, repo=repo, principal=principal, memory=memory)
         return draft
     initial_status = draft.status
     if initial_status not in {"pending", "approved"}:
@@ -486,8 +548,20 @@ def approve_and_send(
             f"Human approved broker draft {draft_id}",
             principal=principal,
         )
+        opportunity = repo.get_opportunity(draft.opportunity_id)
+        if opportunity is not None:
+            _safe_remember(
+                "approve",
+                lambda: remember_decision(
+                    memory,
+                    principal=principal,
+                    draft=approved,
+                    opportunity=opportunity,
+                    outcome="approved",
+                ),
+            )
     if acknowledge:
-        acknowledge_opportunity(draft.opportunity_id, repo=repo, principal=principal)
+        acknowledge_opportunity(draft.opportunity_id, repo=repo, principal=principal, memory=memory)
 
     if not repo.transition_draft(draft_id, "approved", "sending"):
         current = repo.get_draft(draft_id)
@@ -569,9 +643,12 @@ def apply_answers(
     *,
     repo: Repo,
     evidence_ids_by_topic: dict[str, Any],
+    memory: MemoryStore | None = None,
 ) -> list[DiligenceRequest]:
     updated: list[DiligenceRequest] = []
     answered_at = now_utc()
+    memory = memory or get_memory_store(repo)
+    opportunities: dict[str, Opportunity | None] = {}
     for request, answer in matches:
         changes: dict[str, Any] = {
             "answer_summary": answer.answer if answer.resolves else f"partial: {answer.answer}",
@@ -599,6 +676,27 @@ def apply_answers(
             )
         )
         updated.append(revised)
+        if not answer.resolves:
+            continue
+        if request.opportunity_id not in opportunities:
+            opportunities[request.opportunity_id] = repo.get_opportunity(request.opportunity_id)
+        opportunity = opportunities[request.opportunity_id]
+        if opportunity is None or not opportunity.broker_email:
+            continue
+        days = (answered_at - request.sent_at).days if request.sent_at is not None else 0
+        _safe_remember(
+            "answered",
+            lambda opportunity=opportunity, request=request, days=days: remember_broker_outcome(
+                memory,
+                broker_email=opportunity.broker_email,
+                opportunity=opportunity,
+                kind="answered",
+                detail=(
+                    f"answered '{request.topic}' with {document_kind_label(analysis.document_type)} "
+                    f"{days} day{'s' if days != 1 else ''} after the request"
+                ),
+            ),
+        )
     return updated
 
 
@@ -791,9 +889,11 @@ def run_follow_ups(
     outbox: Any,
     notifier: Any,
     as_of: datetime | None = None,
+    memory: MemoryStore | None = None,
 ) -> FollowUpReport:
     """Advance all due requests one cadence step, with per-opportunity batching."""
     tick = as_of or now_utc()
+    memory = memory or get_memory_store(repo)
     report = FollowUpReport(
         as_of=tick,
         sweep_report=sweep(repo, policy, outbox, notifier, tick),
@@ -818,6 +918,7 @@ def run_follow_ups(
                 notifier=notifier,
                 tick=tick,
                 report=report,
+                memory=memory,
             )
         except Exception as exc:
             # One malformed opportunity or failing integration cannot abort the scheduled tick.
@@ -843,7 +944,9 @@ def _run_opportunity_follow_ups(
     notifier: Any,
     tick: datetime,
     report: FollowUpReport,
+    memory: MemoryStore | None = None,
 ) -> None:
+    memory = memory or get_memory_store(repo)
     opp = repo.get_opportunity(opportunity_id)
     if opp is None:
         return
@@ -962,6 +1065,23 @@ def _run_opportunity_follow_ups(
 
     if not stalled_requests:
         return
+
+    if opp.broker_email:
+        follow_ups = max((request.follow_up_count for request in stalled_requests), default=0)
+        topics = ", ".join(request.topic for request in stalled_requests)
+        _safe_remember(
+            "stalled",
+            lambda: remember_broker_outcome(
+                memory,
+                broker_email=opp.broker_email,
+                opportunity=opp,
+                kind="stalled",
+                detail=(
+                    f"went silent on {len(stalled_requests)} request{'s' if len(stalled_requests) != 1 else ''} "
+                    f"after {follow_ups} follow-up{'s' if follow_ups != 1 else ''} ({topics})"
+                ),
+            ),
+        )
 
     notification = format_stalled_alert(
         opp,

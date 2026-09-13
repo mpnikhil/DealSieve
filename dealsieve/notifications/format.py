@@ -16,6 +16,7 @@ from dealsieve.schemas import (
     DiligenceRequest,
     DocumentAnalysis,
     GateResult,
+    MemoryHit,
     Notification,
     NotificationAction,
     Opportunity,
@@ -23,6 +24,18 @@ from dealsieve.schemas import (
     SkepticReport,
     UnderwritingResult,
 )
+
+_MEMORY_LINE_MIN_SCORE = 0.6
+
+
+def _memory_line(memories: list[MemoryHit] | None) -> str | None:
+    """"You previously: <text>" when the top recalled hit is relevant enough to be worth surfacing."""
+    if not memories:
+        return None
+    top = memories[0]
+    if top.score < _MEMORY_LINE_MIN_SCORE:
+        return None
+    return f"You previously: {top.text}"
 
 _LABEL_WIDTH = 17
 _VALUE_WIDTH = 17
@@ -90,6 +103,7 @@ def format_threshold_alert(
     skeptic: SkepticReport | None,
     *,
     pending_request: OutboundDraft | None = None,
+    memories: list[MemoryHit] | None = None,
     channel: Channel = Channel.TELEGRAM,
 ) -> Notification:
     """Build the "DEAL #<n> JUST BECAME INVESTABLE" alert.
@@ -154,6 +168,11 @@ def format_threshold_alert(
             f"({len(pending_request.questions)} questions)"
         )
 
+    memory_line = _memory_line(memories)
+    if memory_line is not None:
+        lines.append("")
+        lines.append(memory_line)
+
     body = "\n".join(lines)
 
     notification = Notification(
@@ -189,6 +208,7 @@ def format_fell_below_alert(
     analysis: DocumentAnalysis | None,
     credit_draft: OutboundDraft | None,
     *,
+    memories: list[MemoryHit] | None = None,
     channel: Channel = Channel.TELEGRAM,
 ) -> Notification:
     """Build the alert emitted when diligence moves a REVIEW deal back below threshold."""
@@ -264,6 +284,11 @@ def format_fell_below_alert(
         amount_match = re.search(r"\$[\d,]+", credit_draft.body)
         amount = amount_match.group(0) if amount_match else "the required"
         lines.extend(["", f"Drafted for your approval: request a {amount} credit."])
+
+    memory_line = _memory_line(memories)
+    if memory_line is not None:
+        lines.append("")
+        lines.append(memory_line)
 
     notification = Notification(
         opportunity_id=opportunity.opportunity_id,

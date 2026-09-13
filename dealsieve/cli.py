@@ -186,6 +186,39 @@ def _cmd_outbox(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_memory(args: argparse.Namespace) -> int:
+    from dealsieve.memory import get_memory_store
+    from dealsieve.persistence import Repo
+
+    repo = Repo(args.db) if args.db else Repo()
+    repo.init_schema()
+    store = get_memory_store(repo)
+
+    namespace = args.namespace or ""
+    if "/" not in namespace and namespace in {"investor", "broker"}:
+        namespace = f"{namespace}/*"
+
+    if args.q:
+        namespaces = [namespace] if namespace else ["investor/*", "broker/*"]
+        hits = store.recall(args.q, namespaces=namespaces, limit=args.limit)
+        if not hits:
+            print("No memories matched.")
+            return 0
+        for hit in hits:
+            print(f"[{hit.score:.2f}] {hit.namespace}  {hit.created_at.isoformat()}")
+            print(f"    {hit.text}")
+        return 0
+
+    events = store.list(namespace, limit=args.limit)
+    if not events:
+        print("Nothing remembered yet.")
+        return 0
+    for event in events:
+        print(f"{event.created_at.isoformat()}  {event.namespace}  ({event.kind})")
+        print(f"    {event.text}")
+    return 0
+
+
 def _cmd_retry(args: argparse.Namespace) -> int:
     """Run one bounded delivery-recovery sweep; failed inbound is report-only."""
     from dealsieve.diligence import sweep
@@ -242,6 +275,13 @@ def build_parser() -> argparse.ArgumentParser:
     p_outbox = sub.add_parser("outbox", help="List broker messages that have been sent.")
     p_outbox.add_argument("--db", default=None, help="Override DEALSIEVE_DB_PATH")
     p_outbox.set_defaults(func=_cmd_outbox)
+
+    p_memory = sub.add_parser("memory", help="Show decision memory: what DealSieve remembers.")
+    p_memory.add_argument("--namespace", default=None, help='e.g. "investor/human:local" or "broker"')
+    p_memory.add_argument("--q", default=None, help="Search text; omit to just list recent memories")
+    p_memory.add_argument("--limit", type=int, default=20)
+    p_memory.add_argument("--db", default=None, help="Override DEALSIEVE_DB_PATH")
+    p_memory.set_defaults(func=_cmd_memory)
 
     p_retry = sub.add_parser(
         "retry",

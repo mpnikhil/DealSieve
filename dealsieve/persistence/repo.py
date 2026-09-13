@@ -32,6 +32,7 @@ from dealsieve.schemas import (
     EventType,
     Evidence,
     InboundMessage,
+    MemoryEvent,
     Notification,
     Opportunity,
     OpportunityDetail,
@@ -1006,6 +1007,70 @@ class Repo:
         ).fetchall()
         return [_load(DocumentAnalysis, r["json"]) for r in rows]
 
+    # ------------------------------------------------------------------ decision memory
+
+    @_locked
+    def store_memory_event(self, event: MemoryEvent) -> MemoryEvent:
+        """Insert one remembered event (dealsieve.memory). Memory events are append-only, like
+        opportunity_events, but keyed by their own id rather than an opportunity-scoped sequence."""
+        self._conn.execute(
+            """
+            INSERT OR REPLACE INTO memory_events
+                (memory_event_id, namespace, kind, opportunity_id, broker_email, created_at, json)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                event.memory_event_id,
+                event.namespace,
+                event.kind,
+                event.opportunity_id,
+                event.broker_email,
+                event.created_at.isoformat(),
+                _dump(event),
+            ),
+        )
+        self._conn.commit()
+        return event
+
+    @_locked
+    def list_memory_events(self, namespace: str, limit: int = 50) -> list[MemoryEvent]:
+        """Most recent events for one namespace. An empty ``namespace`` means "every namespace"."""
+        if not namespace:
+            return self.search_memory_events(["investor/*", "broker/*"], limit=limit)
+        if namespace.endswith("/*"):
+            return self.search_memory_events([namespace], limit=limit)
+        rows = self._conn.execute(
+            "SELECT json FROM memory_events WHERE namespace = ? ORDER BY created_at DESC, rowid DESC LIMIT ?",
+            (namespace, limit),
+        ).fetchall()
+        return [_load(MemoryEvent, r["json"]) for r in rows]
+
+    @_locked
+    def search_memory_events(self, namespaces: list[str], limit: int = 200) -> list[MemoryEvent]:
+        """Rows across ``namespaces``, most recent first, capped at ``limit``.
+
+        Each entry matches exactly, except one ending in ``"/*"`` which matches by prefix (e.g.
+        ``"investor/*"`` matches every ``"investor/<principal>"`` namespace). Callers rank the result
+        themselves (see ``dealsieve.memory``); this is deliberately just a fetch.
+        """
+        if not namespaces:
+            return []
+        clauses: list[str] = []
+        params: list[Any] = []
+        for namespace in namespaces:
+            if namespace.endswith("/*"):
+                clauses.append("namespace LIKE ?")
+                params.append(f"{namespace[:-1]}%")
+            else:
+                clauses.append("namespace = ?")
+                params.append(namespace)
+        where = " OR ".join(clauses)
+        rows = self._conn.execute(
+            f"SELECT json FROM memory_events WHERE {where} ORDER BY created_at DESC, rowid DESC LIMIT ?",  # noqa: S608
+            (*params, limit),
+        ).fetchall()
+        return [_load(MemoryEvent, r["json"]) for r in rows]
+
     # ------------------------------------------------------------------ read models for API/dashboard
 
     @_locked
@@ -1095,8 +1160,14 @@ class Repo:
         return items
 
     @_locked
-    def opportunity_detail(self, opportunity_id: str) -> OpportunityDetail | None:
-        """Accepts an opportunity_id or a deal-number string."""
+    def opportunity_detail(self, opportunity_id: str, *, memory: Any | None = None) -> OpportunityDetail | None:
+        """Accepts an opportunity_id or a deal-number string.
+
+        ``memory`` is a ``dealsieve.memory.MemoryStore`` (any object with a ``recall`` method); it is
+        typed ``Any`` here so persistence never has to import the memory package at module scope
+        (that package imports ``Repo``, so a module-level import back would be circular). When given,
+        ``detail.memories`` is filled via ``dealsieve.memory.recall_for_deal``; omitted, it stays empty.
+        """
         opp = self.get_opportunity(opportunity_id)
         if opp is None and opportunity_id.isdigit():
             opp = self.get_opportunity_by_deal_number(int(opportunity_id))
@@ -1114,6 +1185,15 @@ class Repo:
         if latest_run is None and runs:
             latest_run = runs[-1]
 
+        diligence_requests = self.list_diligence_requests(opportunity_id=opp.opportunity_id)
+
+        memories = []
+        if memory is not None:
+            from dealsieve.memory import recall_for_deal
+
+            topics = list(dict.fromkeys(request.topic for request in diligence_requests))
+            memories = recall_for_deal(memory, opp, prop, topics=topics, broker_email=opp.broker_email)
+
         return OpportunityDetail(
             opportunity=opp,
             property=prop,
@@ -1124,9 +1204,10 @@ class Repo:
             skeptic_reports=self.list_skeptic_reports(opp.opportunity_id),
             drafts=self.list_drafts(opportunity_id=opp.opportunity_id),
             notifications=self.list_notifications(opportunity_id=opp.opportunity_id),
-            diligence_requests=self.list_diligence_requests(opportunity_id=opp.opportunity_id),
+            diligence_requests=diligence_requests,
             document_analyses=self.list_document_analyses(opp.opportunity_id),
             inbound_messages=self.list_inbound_messages(opp.opportunity_id),
+            memories=memories,
         )
 
     # ------------------------------------------------------------------ identity lookups

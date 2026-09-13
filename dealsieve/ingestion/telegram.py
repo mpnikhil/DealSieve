@@ -170,7 +170,21 @@ class TelegramBot:
                 reject_draft(target_id, repo=self.repo, principal=principal)
                 self._answer_callback(callback_id, "Rejected.")
             elif action in ("review", "ignore"):
-                acknowledge_opportunity(target_id, repo=self.repo, principal=principal)
+                # Review/ignore buttons target the opportunity, not a specific notification (see
+                # module docstring), so the most recently created notification for it is the best
+                # guess at "the alert this button was on" for the decision-memory record below.
+                notification = max(
+                    self.repo.list_notifications(opportunity_id=target_id),
+                    key=lambda n: n.created_at,
+                    default=None,
+                )
+                acknowledge_opportunity(
+                    target_id,
+                    repo=self.repo,
+                    principal=principal,
+                    notification=notification,
+                    action=action,  # type: ignore[arg-type]
+                )
                 self._answer_callback(callback_id, "Noted." if action == "ignore" else "Opening review.")
             else:
                 self._answer_callback(callback_id)

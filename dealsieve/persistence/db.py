@@ -164,6 +164,20 @@ CREATE TABLE IF NOT EXISTS document_analyses (
 );
 
 CREATE INDEX IF NOT EXISTS idx_document_analyses_opportunity_id ON document_analyses(opportunity_id);
+
+CREATE TABLE IF NOT EXISTS memory_events (
+    memory_event_id TEXT PRIMARY KEY,
+    namespace       TEXT NOT NULL,
+    kind            TEXT NOT NULL,
+    opportunity_id  TEXT NULL REFERENCES opportunities(opportunity_id),
+    broker_email    TEXT,
+    created_at      TEXT NOT NULL,
+    json            TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_memory_events_namespace ON memory_events(namespace);
+CREATE INDEX IF NOT EXISTS idx_memory_events_opportunity_id ON memory_events(opportunity_id);
+CREATE INDEX IF NOT EXISTS idx_memory_events_created_at ON memory_events(created_at);
 """
 
 

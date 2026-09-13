@@ -32,6 +32,7 @@ from pydantic import BaseModel, TypeAdapter
 
 from dealsieve.ingestion.email import parse_eml
 from dealsieve.ingestion.text import from_text
+from dealsieve.memory import MemoryStore, get_memory_store
 from dealsieve.notifications import Notifier, get_notifier
 from dealsieve.outbound import Outbox, get_outbox
 from dealsieve.persistence import Repo
@@ -41,6 +42,8 @@ from dealsieve.schemas import (
     Channel,
     DiligenceRequest,
     InboundMessage,
+    MemoryEvent,
+    MemoryHit,
     Notification,
     Opportunity,
     OpportunityStatus,
@@ -69,6 +72,8 @@ _watchlist_adapter: TypeAdapter[list[WatchlistItem]] = TypeAdapter(list[Watchlis
 _notification_adapter: TypeAdapter[list[Notification]] = TypeAdapter(list[Notification])
 _draft_adapter: TypeAdapter[list[OutboundDraft]] = TypeAdapter(list[OutboundDraft])
 _diligence_adapter: TypeAdapter[list[DiligenceRequest]] = TypeAdapter(list[DiligenceRequest])
+_memory_hit_adapter: TypeAdapter[list[MemoryHit]] = TypeAdapter(list[MemoryHit])
+_memory_event_adapter: TypeAdapter[list[MemoryEvent]] = TypeAdapter(list[MemoryEvent])
 
 
 def _json(model: BaseModel, *, status_code: int = 200) -> Response:
@@ -133,6 +138,21 @@ class FollowUpTickBody(BaseModel):
     as_of: str | None = None
 
 
+class RejectDraftBody(BaseModel):
+    reason: str | None = None
+
+
+def _normalize_namespace(namespace: str | None) -> str:
+    """"" (all), "investor"/"broker" (every principal/broker under that prefix), or a namespace as-is."""
+    if not namespace:
+        return ""
+    if "/" in namespace:
+        return namespace
+    if namespace in {"investor", "broker"}:
+        return f"{namespace}/*"
+    return namespace
+
+
 def require_human(request: Request) -> str:
     """Authenticate a human approver and return the auditable principal label."""
     configured = os.environ.get("DEALSIEVE_APPROVER_TOKEN")
@@ -154,6 +174,7 @@ def create_app(
     policy: InvestmentPolicy | None = None,
     notifier: Notifier | None = None,
     outbox: Outbox | None = None,
+    memory: MemoryStore | None = None,
 ) -> FastAPI:
     app = FastAPI(title="DealSieve", version="0.1.0")
 
@@ -170,6 +191,7 @@ def create_app(
     app.state.policy = policy
     app.state.notifier = notifier
     app.state.outbox = outbox
+    app.state.memory = memory
 
     def get_repo(request: Request) -> Repo:
         if request.app.state.repo is None:
@@ -190,6 +212,11 @@ def create_app(
         if request.app.state.outbox is None:
             request.app.state.outbox = get_outbox(policy)
         return request.app.state.outbox
+
+    def get_memory_dep(request: Request, repo: Repo = Depends(get_repo)) -> MemoryStore:  # noqa: B008
+        if request.app.state.memory is None:
+            request.app.state.memory = get_memory_store(repo)
+        return request.app.state.memory
 
     # ----------------------------------------------------------------------------------- health / stats
 
@@ -223,8 +250,12 @@ def create_app(
         return _json_list(_watchlist_adapter, items)
 
     @app.get("/api/opportunities/{opportunity_id}")
-    def get_opportunity_detail(opportunity_id: str, repo: Repo = Depends(get_repo)) -> Response:  # noqa: B008
-        detail = repo.opportunity_detail(opportunity_id)
+    def get_opportunity_detail(
+        opportunity_id: str,
+        repo: Repo = Depends(get_repo),  # noqa: B008
+        memory: MemoryStore = Depends(get_memory_dep),  # noqa: B008
+    ) -> Response:
+        detail = repo.opportunity_detail(opportunity_id, memory=memory)
         if detail is None:
             raise HTTPException(status_code=404, detail=f"No opportunity matching {opportunity_id!r}")
         return _json(detail)
@@ -242,6 +273,7 @@ def create_app(
         repo: Repo = Depends(get_repo),  # noqa: B008
         policy: InvestmentPolicy = Depends(get_policy),  # noqa: B008
         outbox: Outbox = Depends(get_outbox_dep),  # noqa: B008
+        memory: MemoryStore = Depends(get_memory_dep),  # noqa: B008
     ) -> Response:
         from dealsieve.diligence import approve_and_send
 
@@ -253,6 +285,7 @@ def create_app(
                     policy=policy,
                     outbox=outbox,
                     principal=principal,
+                    memory=memory,
                 )
             )
         except LookupError as exc:
@@ -263,13 +296,22 @@ def create_app(
     @app.post("/api/drafts/{draft_id}/reject")
     def reject_draft(
         draft_id: str,
+        # Plain `None` (not `Body(default=None)`): dealsieve/tests/model/world.py calls this
+        # endpoint's closure directly, bypassing FastAPI's dependency injection, so any FastAPI
+        # marker object used as a default would leak through unresolved. A bare Optional[BaseModel]
+        # default is still recognized by FastAPI as an optional JSON body over real HTTP.
+        body: RejectDraftBody | None = None,
         principal: str = Depends(require_human),  # noqa: B008
         repo: Repo = Depends(get_repo),  # noqa: B008
+        memory: MemoryStore = Depends(get_memory_dep),  # noqa: B008
     ) -> Response:
         from dealsieve.diligence import reject_draft as reject_draft_action
 
+        reason = body.reason if body is not None else None
         try:
-            return _json(reject_draft_action(draft_id, repo=repo, principal=principal))
+            return _json(
+                reject_draft_action(draft_id, repo=repo, principal=principal, reason=reason, memory=memory)
+            )
         except LookupError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
         except ValueError as exc:
@@ -284,7 +326,14 @@ def create_app(
     ) -> Response:
         return _json_list(_notification_adapter, list(repo.list_notifications(opportunity_id=opportunity_id)))
 
-    def _acknowledge_notification(notification_id: str, *, principal: str, repo: Repo) -> Notification:
+    def _acknowledge_notification(
+        notification_id: str,
+        *,
+        principal: str,
+        repo: Repo,
+        memory: MemoryStore,
+        action: Literal["ignore", "review"],
+    ) -> Notification:
         from dealsieve.diligence import acknowledge_opportunity
 
         notification = repo.get_notification(notification_id)
@@ -294,6 +343,9 @@ def create_app(
             notification.opportunity_id,
             repo=repo,
             principal=principal,
+            memory=memory,
+            notification=notification,
+            action=action,
         )
         return notification
 
@@ -302,16 +354,22 @@ def create_app(
         notification_id: str,
         principal: str = Depends(require_human),  # noqa: B008
         repo: Repo = Depends(get_repo),  # noqa: B008
+        memory: MemoryStore = Depends(get_memory_dep),  # noqa: B008
     ) -> Response:
-        return _json(_acknowledge_notification(notification_id, principal=principal, repo=repo))
+        return _json(
+            _acknowledge_notification(notification_id, principal=principal, repo=repo, memory=memory, action="ignore")
+        )
 
     @app.post("/api/notifications/{notification_id}/review")
     def review_notification(
         notification_id: str,
         principal: str = Depends(require_human),  # noqa: B008
         repo: Repo = Depends(get_repo),  # noqa: B008
+        memory: MemoryStore = Depends(get_memory_dep),  # noqa: B008
     ) -> Response:
-        return _json(_acknowledge_notification(notification_id, principal=principal, repo=repo))
+        return _json(
+            _acknowledge_notification(notification_id, principal=principal, repo=repo, memory=memory, action="review")
+        )
 
     # ----------------------------------------------------------------------------------- diligence
 
@@ -330,6 +388,7 @@ def create_app(
         policy: InvestmentPolicy = Depends(get_policy),  # noqa: B008
         notifier: Notifier = Depends(get_notifier_dep),  # noqa: B008
         outbox: Outbox = Depends(get_outbox_dep),  # noqa: B008
+        memory: MemoryStore = Depends(get_memory_dep),  # noqa: B008
     ) -> JSONResponse:
         from dealsieve.diligence import run_follow_ups
 
@@ -341,8 +400,26 @@ def create_app(
                 as_of = datetime.fromisoformat(body.as_of.replace("Z", "+00:00"))
             except ValueError as exc:
                 raise HTTPException(status_code=422, detail="as_of must be an ISO-8601 datetime") from exc
-        report = run_follow_ups(repo=repo, policy=policy, outbox=outbox, notifier=notifier, as_of=as_of)
+        report = run_follow_ups(
+            repo=repo, policy=policy, outbox=outbox, notifier=notifier, as_of=as_of, memory=memory
+        )
         return JSONResponse(jsonable_encoder(report.model_dump(mode="json")))
+
+    # ----------------------------------------------------------------------------------- memory
+
+    @app.get("/api/memory")
+    def list_memory(
+        namespace: str | None = Query(default=None),
+        q: str | None = Query(default=None),
+        limit: int = Query(default=20, ge=1, le=200),
+        memory: MemoryStore = Depends(get_memory_dep),  # noqa: B008
+    ) -> Response:
+        ns = _normalize_namespace(namespace)
+        if q:
+            namespaces = [ns] if ns else ["investor/*", "broker/*"]
+            hits = memory.recall(q, namespaces=namespaces, limit=limit)
+            return _json_list(_memory_hit_adapter, hits)
+        return _json_list(_memory_event_adapter, memory.list(ns, limit=limit))
 
     @app.get("/api/correspondence/{opportunity_id}")
     def correspondence(opportunity_id: str, repo: Repo = Depends(get_repo)) -> JSONResponse:  # noqa: B008
