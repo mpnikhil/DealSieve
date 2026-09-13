@@ -14,7 +14,11 @@
    remembering a procedure.
 4. **Isolation (R6).** Every safety-net action is wrapped independently. A failing skeptic must not
    cost the human their notification. Failures become NOTE events and text in the summary.
-5. Mark the message completed or failed, and return the outcome. `process_inbound` never raises.
+5. **Delivery is not assumed (G3).** `notified_human` is true only when a notifier actually returned.
+   A message that ends with a stored-but-undelivered alert is marked *failed*, not completed, and a
+   re-run resumes that delivery (the safety net's last step) instead of treating the dedupe row as
+   proof the human was told.
+6. Mark the message completed or failed, and return the outcome. `process_inbound` never raises.
 """
 
 from __future__ import annotations
@@ -32,6 +36,7 @@ from dealsieve.agents.tools import (
     perform_request_price_adjustment,
     perform_skeptic_review,
     perform_underwrite,
+    resume_undelivered_notifications,
 )
 from dealsieve.models import backend_name
 from dealsieve.notifications import Notifier
@@ -189,8 +194,14 @@ def _safety_net(session: ProcessingSession) -> list[str]:
             if "skipped" not in result and "error" not in result:
                 actions.append(f"credit request drafted by safety net (${result['amount']})")
 
-    # 4. Either kind of decision change owes the human one interruption.
-    if (session.threshold_crossed or session.threshold_lost) and session.notification is None:
+    # 4. Either kind of decision change owes the human one interruption. A delivery that already
+    #    failed in this message is NOT retried here: the message is marked failed instead, so the
+    #    retry happens on a re-run rather than hammering a notifier that is currently down.
+    if (
+        (session.threshold_crossed or session.threshold_lost)
+        and session.notification is None
+        and session.notification_error is None
+    ):
         result = _isolated(
             session,
             "notification",
@@ -204,6 +215,13 @@ def _safety_net(session: ProcessingSession) -> list[str]:
             session.errors.append(f"safety-net notification skipped: {result['skipped']}")
         elif "error" not in result:
             actions.append("human notified by safety net")
+
+    # 5. An alert recorded on an earlier run but never delivered is finished here (R3/G3). The
+    #    dedupe row means "we tried", not "the human knows".
+    if session.opportunity_id is not None and session.notification_error is None:
+        result = _isolated(session, "notification resume", lambda: resume_undelivered_notifications(session))
+        if result.get("resumed"):
+            actions.append(f"{result['resumed']} undelivered notification(s) delivered by safety net")
 
     return actions
 
@@ -282,7 +300,20 @@ def process_inbound(
 
     # Completed means "dealt with; never run this again". A message that produced no underwriting
     # run has not been dealt with -- leave it failed so a retry, or a fixed model, can pick it up.
-    _finish(repo, message.message_id, error=None if session.run_after is not None else (fatal or summary))
+    # So has one whose alert never reached the human: the decision change is recorded but nobody
+    # knows about it, and a re-run resumes that delivery (G3).
+    alert = session.notification or session.undelivered_notification
+    delivered = session.notification is not None and session.notification.delivered
+    undelivered = session.notification_error is not None or (
+        session.notification is not None and not session.notification.delivered
+    )
+    if session.run_after is None:
+        failure: str | None = fatal or summary
+    elif undelivered:
+        failure = session.notification_error or "the human was not notified: delivery never completed"
+    else:
+        failure = None
+    _finish(repo, message.message_id, error=failure)
 
     return ProcessingOutcome(
         message_id=message.message_id,
@@ -292,8 +323,8 @@ def process_inbound(
         status_after=status_after,
         run_id=session.run_after.run_id if session.run_after else None,
         events_created=list(session.events_created),
-        notified_human=session.notification is not None,
-        notification_id=session.notification.notification_id if session.notification else None,
+        notified_human=delivered,
+        notification_id=alert.notification_id if alert else None,
         skeptic_report_id=session.skeptic_report.report_id if session.skeptic_report else None,
         draft_id=session.draft.draft_id if session.draft else None,
         summary=summary,

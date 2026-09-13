@@ -67,13 +67,18 @@ underwritten on, so this always comes before underwriting.
      b. `request_diligence` with the skeptic's concerns that carry a `question_for_broker` and whose \
 `evidence_status` is "missing", "weak" or "unverified" (never "contradicted": contradictions are for \
 the human). One item per concern, at most 5, "missing" first: `topic` copied from the concern, \
-`question` copied from its `question_for_broker`. If no concern qualifies, skip straight to \
-`notify_human`.
+`question` copied from its `question_for_broker`. The code reconciles your items against that \
+skeptic report and chases the report's own wording: an item that matches no concern is dropped and \
+listed under "dropped" in the result, so never invent a question here or carry one over from the \
+broker's text. If no concern qualifies, skip straight to `notify_human`.
      c. `notify_human` with one short line on why this matters now.
    - `threshold_lost` is true -- diligence pushed a deal you were pursuing back out of reach:
      a. `request_price_adjustment` with `amount` = the current asking price minus the maximum \
 viable price from the underwrite result, and a `rationale` drawn from what the document \
-established (what the work is, and the document's own cost range).
+established (what the work is, and the document's own cost range). The code recomputes the amount \
+from the stored frontier, and it only allows the request at all when the deal fell out of REVIEW, \
+or when it is NEAR/WATCH and this message brought a document you analyzed or a changed asking \
+price; otherwise it returns {"skipped": ...} and there is nothing to ask for.
      b. `notify_human` with one short line on what changed and why.
    - Neither is true: stop. Reply with ONE line stating the status and that no human attention is \
 needed. Do not call any other tool.

@@ -24,6 +24,7 @@ from dealsieve.schemas import (
     IdentityKeys,
     OpportunityStatus,
     ResolutionResult,
+    SkepticConcern,
 )
 
 from .conftest import fake_threshold_alert, make_run, make_skeptic_report, make_working_values
@@ -293,7 +294,17 @@ def test_diligence_creates_tracked_requests_and_a_pending_draft(
 ):
     record(session, claims)
     underwrite_as(session, monkeypatch, OpportunityStatus.REVIEW, cap=Decimal("0.083"), dscr=Decimal("1.43"))
-    session.skeptic_report = make_skeptic_report(session.opportunity_id, session.run_after.run_id)
+    report = make_skeptic_report(session.opportunity_id, session.run_after.run_id)
+    report.concerns.append(
+        SkepticConcern(
+            topic="Phase I environmental",
+            severity="high",
+            why_it_matters="Solvent-using tenants and a lender that will require one anyway.",
+            evidence_status="missing",
+            question_for_broker="May we see the Phase I?",
+        )
+    )
+    session.skeptic_report = report
 
     result = perform_request_diligence(
         session,
@@ -305,6 +316,7 @@ def test_diligence_creates_tracked_requests_and_a_pending_draft(
 
     assert result["awaiting_approval"] is True and result["status"] == "pending"
     assert len(result["request_ids"]) == 2
+    assert result["dropped"] == [], "both items correspond to a concern the skeptic actually raised"
     draft = fake_repo.list_drafts(opportunity_id=session.opportunity_id)[0]
     assert draft.status == "pending" and draft.to_email == "broker@brokerage.example"
     assert "How old is the roof?" in draft.body
@@ -365,7 +377,10 @@ def test_a_notifier_without_a_channel_falls_back_to_the_formatter_default(sessio
 
     result = perform_notify_human(session, "crossed")
     assert result["channel"] == Channel.TELEGRAM.value
-    assert result["delivered"] is False, "a notifier returning no reference did not deliver"
+    # G3: delivery is "the notifier returned", not "the notifier returned a reference". The console
+    # notifier prints the alert and has no reference to give; that is still a delivered alert.
+    assert result["delivered"] is True and result["delivery_ref"] is None
+    assert session.notification is not None and session.notification_error is None
 
 
 def test_events_can_be_attributed_to_the_system_actor(session, claims, fake_repo, monkeypatch):

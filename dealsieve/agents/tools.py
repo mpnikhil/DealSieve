@@ -6,8 +6,8 @@ human without a real threshold crossing, cannot chase diligence on a deal that i
 cannot put a dollar figure in front of a broker without a human approving it. If the model skips a
 step, `dealsieve.pipeline`'s safety net performs it as the SYSTEM actor.
 
-Two invariants are worth calling out because they were real defects (see the review findings in
-`docs/CONTRACTS.md`):
+Invariants worth calling out because they were real defects (see the review findings in
+`docs/CONTRACTS.md` and the Phase 2 hardening pass):
 
 * **R5, the phase machine.** Tool calls for one message must follow one order, and repeats change
   nothing. Before the phase machine existed, a model that called `underwrite` twice cleared the
@@ -15,7 +15,14 @@ Two invariants are worth calling out because they were real defects (see the rev
   now enforced in :class:`ProcessingSession`, not in the prompt.
 * **R3, intent before delivery.** A notification is persisted with `delivered=False` *first*, under a
   unique `dedupe_key`; only then is it delivered and marked. A crash between the two leaves a record
-  that says "we tried", so the safety net (or a later retry) skips it instead of alerting twice.
+  that says "we tried", so a retry resumes *that* delivery instead of alerting twice -- and a
+  delivery that raised is never reported as a delivery that happened.
+* **G1/G2, capex is verified and aggregated.** Capex items are model *proposals*: an item enters the
+  underwriting basis only when both of its dollar figures actually appear in the document's text
+  (:func:`verify_capex_items`), and the basis is the union of every accepted item across every
+  analysis of the opportunity (:func:`aggregate_capex_items`), never just the newest document's.
+* **G4/G5, the model does not choose the asks.** Diligence items are reconciled against the skeptic's
+  own concerns server-side, and a credit request needs a real reason in this message.
 """
 
 from __future__ import annotations
@@ -24,9 +31,10 @@ import inspect
 import json
 import logging
 import math
-from collections.abc import Callable
+import re
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from types import ModuleType
 from typing import TYPE_CHECKING, Any, Literal
@@ -41,6 +49,7 @@ from dealsieve.policy import InvestmentPolicy
 from dealsieve.schemas import (
     Actor,
     Attachment,
+    CapexItem,
     DiligenceRequest,
     DocumentAnalysis,
     DocumentFinding,
@@ -155,6 +164,10 @@ class ProcessingSession:
     threshold_lost: bool = False
     skeptic_report: SkepticReport | None = None
     notification: Notification | None = None
+    """The alert that was actually delivered. `None` while nothing has reached the human."""
+    undelivered_notification: Notification | None = None
+    """A stored alert whose delivery raised. The message is retryable until it goes out (G3)."""
+    notification_error: str | None = None
     draft: OutboundDraft | None = None
     pending_request: OutboundDraft | None = None
     credit_draft: OutboundDraft | None = None
@@ -168,6 +181,8 @@ class ProcessingSession:
     claims: ExtractedClaims | None = None
     last_event_id: str | None = None
     underwrite_result: dict[str, Any] | None = None
+    event_types_created: set[EventType] = field(default_factory=set)
+    """Every event type this message appended. Gates that ask "did anything actually change?" use it."""
 
     # -- R5 phase machine --------------------------------------------------
     phase: int = 0
@@ -220,6 +235,7 @@ class ProcessingSession:
             )
         )
         self.events_created.append(stored.event_id)
+        self.event_types_created.add(event_type)
         self.last_event_id = stored.event_id
         return stored
 
@@ -512,6 +528,114 @@ def evidence_from_findings(analysis: DocumentAnalysis) -> list[Evidence]:
     ]
 
 
+# ------------------------------------------------------------------ capex: verify (G1), aggregate (G2)
+
+#: Whitespace and dash characters a PDF extractor emits that a naive match would trip over.
+_TEXT_NORMALIZATION = str.maketrans(
+    {
+        " ": " ",  # no-break space
+        " ": " ",  # figure space
+        " ": " ",  # thin space
+        " ": " ",  # narrow no-break space
+        "–": "-",  # en dash, as in "$85,000–$95,000"
+        "—": "-",  # em dash
+        "−": "-",  # minus sign
+    }
+)
+
+#: A money-ish figure in document text: "85000", "85,000", "$85,000.00", "$85k", "1.2M".
+_AMOUNT_RE = re.compile(r"(\d{1,3}(?:,\d{3})+|\d+)(?:\.(\d+))?(?:\s*([kKmM])\b)?")
+
+_SUFFIX_MULTIPLIER = {"k": Decimal(1_000), "m": Decimal(1_000_000)}
+
+
+def document_amounts(text: str) -> set[Decimal]:
+    """Every number the document text states, in every common money rendering.
+
+    The verifier compares values rather than strings so that "$85,000", "85,000", "85000" and "$85k"
+    all satisfy the same item, and so that thin spaces or an en dash inside a range cannot make a
+    figure that is plainly in the document look absent.
+    """
+    amounts: set[Decimal] = set()
+    for whole, fraction, suffix in _AMOUNT_RE.findall((text or "").translate(_TEXT_NORMALIZATION)):
+        try:
+            value = Decimal(whole.replace(",", "") + (f".{fraction}" if fraction else ""))
+        except InvalidOperation:  # pragma: no cover - defensive
+            continue
+        if suffix:
+            value *= _SUFFIX_MULTIPLIER[suffix.lower()]
+        amounts.add(value)
+    return amounts
+
+
+def _item_amounts(item: CapexItem) -> list[Decimal]:
+    """The item's low and high, deduplicated, in order."""
+    return list(dict.fromkeys((Decimal(item.low), Decimal(item.high))))
+
+
+def _unverified_amounts(item: CapexItem, amounts: set[Decimal]) -> list[Decimal]:
+    return [amount for amount in _item_amounts(item) if amount not in amounts]
+
+
+def capex_rejection_reason(item: CapexItem, document_text: str) -> str:
+    """Why this proposed capex item is not usable: which of its figures the document never states."""
+    missing = _unverified_amounts(item, document_amounts(document_text))
+    if not missing:  # pragma: no cover - only called for rejected items
+        return "verified"
+    figures = " and ".join(_money(amount) for amount in missing)
+    return f"{figures} does not appear in the text of {item.source_document}"
+
+
+def verify_capex_items(
+    items: list[CapexItem], document_text: str
+) -> tuple[list[CapexItem], list[CapexItem]]:
+    """Split model-proposed capex into (accepted, rejected) against what the document actually says.
+
+    Capex moves the underwriting basis, so an item is a *proposal* until both of its dollar figures
+    are found in the document's own text. Anything else -- a hallucinated range, a figure lifted from
+    prose injected into the document, a helpful "typical" cost -- is rejected. `location` is not
+    required: a model that cannot name the page but quotes the right numbers is still verifiable.
+    """
+    amounts = document_amounts(document_text)
+    accepted: list[CapexItem] = []
+    rejected: list[CapexItem] = []
+    for item in items:
+        (rejected if _unverified_amounts(item, amounts) else accepted).append(item)
+    return accepted, rejected
+
+
+def _capex_key(item_text: str) -> str:
+    """Dedupe key for a capex item: casefolded, whitespace-collapsed item text."""
+    return " ".join(item_text.split()).casefold()
+
+
+def aggregate_capex_items(
+    analyses: Iterable[DocumentAnalysis],
+) -> tuple[list[CapexItem], list[str]]:
+    """Union the verified capex of every analysis of one opportunity, newest estimate winning.
+
+    A second document must not erase the first document's capital work (that defect quietly halved
+    the basis), and the same item priced twice must not count twice. Items are matched on normalized
+    item text; when two documents price the same item differently the later figure is used and the
+    disagreement is returned as a conflict string, because contradictory source data is recorded,
+    never silently resolved.
+    """
+    merged: dict[str, CapexItem] = {}
+    conflicts: list[str] = []
+    for analysis in sorted(analyses, key=lambda a: a.created_at):
+        for item in analysis.capex_items:
+            key = _capex_key(item.item)
+            previous = merged.get(key)
+            if previous is not None and _item_amounts(previous) != _item_amounts(item):
+                conflicts.append(
+                    f"Capex '{item.item}': {previous.source_document} says "
+                    f"{_money(previous.low)}-{_money(previous.high)}, {item.source_document} says "
+                    f"{_money(item.low)}-{_money(item.high)}; the later document is used"
+                )
+            merged[key] = item
+    return list(merged.values()), conflicts
+
+
 def perform_analyze_document(
     session: ProcessingSession, filename: str | None = None, *, actor: Actor = Actor.AGENT
 ) -> dict[str, Any]:
@@ -520,6 +644,11 @@ def perform_analyze_document(
     The document becomes four things: an immutable `DocumentAnalysis`, evidence rows with page and
     photo provenance, answers to whichever diligence requests it settles, and -- when it prices day-one
     capital work -- an `immediate_capex` figure that changes the basis the next underwriting run uses.
+
+    Capex is the part a model must not be trusted with, so it goes through two deterministic steps:
+    every proposed item is verified against the document's own text (G1) and only verified items are
+    stored, and the opportunity's basis is then recomputed as the union of the verified items across
+    every analysis of this deal (G2), so a second document adds to the first instead of replacing it.
     """
     from dealsieve.agents.inspector import run_inspector
 
@@ -547,6 +676,23 @@ def perform_analyze_document(
     ]
 
     analysis = run_inspector(session, attachment, open_requests)
+
+    # --- capex proposals are verified against the document before they are stored (G1) -
+    accepted_capex, rejected_capex = verify_capex_items(analysis.capex_items, attachment.text or "")
+    rejections = [
+        {
+            "item": item.item,
+            "low": str(item.low),
+            "high": str(item.high),
+            "urgency": item.urgency,
+            "location": item.location,
+            "reason": capex_rejection_reason(item, attachment.text or ""),
+        }
+        for item in rejected_capex
+    ]
+    if rejected_capex:
+        analysis = analysis.model_copy(update={"capex_items": accepted_capex})
+
     repo.store_document_analysis(analysis)
     session.analyses.append(analysis)
 
@@ -569,9 +715,24 @@ def perform_analyze_document(
             "findings": len(analysis.findings),
             "images_reviewed": analysis.images_reviewed,
             "red_flags": list(analysis.red_flags),
+            "capex_items": [
+                {"item": i.item, "low": str(i.low), "high": str(i.high), "urgency": i.urgency}
+                for i in analysis.capex_items
+            ],
+            "rejected_capex": rejections,
         },
         actor=actor,
     )
+
+    for rejection in rejections:
+        session.append_event(
+            EventType.NOTE,
+            f"Capex item not verified against document text: {rejection['item']} "
+            f"({_money(Decimal(rejection['low']))}-{_money(Decimal(rejection['high']))}); "
+            f"{rejection['reason']}",
+            {"filename": analysis.filename, "analysis_id": analysis.analysis_id, **rejection},
+            actor=actor,
+        )
 
     # --- answers: which of the open questions did this document settle? ----------------
     matches = diligence.match_answers(open_requests, analysis)
@@ -581,15 +742,26 @@ def perform_analyze_document(
     answered_topics = [r.topic for r in answered if r.status == "answered"]
     still_open = [r.topic for r in open_requests if r.topic not in answered_topics]
 
-    # --- capex: day-one capital work changes the basis, so it changes the underwriting --
-    capex_total = diligence.immediate_capex_from(analysis.capex_items, session.policy)
-    capex_applied = Decimal("0")
-    if capex_total > 0 and opp.working_values is not None:
-        previous = Decimal(opp.working_values.immediate_capex or 0)
-        if capex_total != previous:
-            opp.working_values.immediate_capex = capex_total
-            opp.working_values.capex_items = list(analysis.capex_items)
+    # --- capex: the basis is every verified item this opportunity knows about (G2) ------
+    stored = list(repo.list_document_analyses(opp.opportunity_id))
+    if all(other.analysis_id != analysis.analysis_id for other in stored):  # pragma: no cover
+        stored.append(analysis)  # a repo that does not read its own write back
+    all_items, capex_conflicts = aggregate_capex_items(stored)
+    capex_total = diligence.immediate_capex_from(all_items, session.policy)
+
+    working = opp.working_values
+    if working is not None:
+        previous = Decimal(working.immediate_capex or 0)
+        new_conflicts = [c for c in capex_conflicts if c not in working.conflicts]
+        changed = (
+            capex_total != previous or list(working.capex_items) != all_items or bool(new_conflicts)
+        )
+        working.immediate_capex = capex_total
+        working.capex_items = all_items
+        working.conflicts = [*working.conflicts, *new_conflicts]
+        if changed:
             repo.save_opportunity(opp)
+        if capex_total != previous:
             session.append_event(
                 EventType.CAPEX_ADJUSTED,
                 f"Immediate capex {_money(previous)} -> {_money(capex_total)} from {analysis.filename}",
@@ -597,14 +769,21 @@ def perform_analyze_document(
                     "from": str(previous),
                     "to": str(capex_total),
                     "source_document": analysis.filename,
+                    "analyses": len(stored),
                     "items": [
-                        {"item": i.item, "low": str(i.low), "high": str(i.high), "urgency": i.urgency}
-                        for i in analysis.capex_items
+                        {
+                            "item": i.item,
+                            "low": str(i.low),
+                            "high": str(i.high),
+                            "urgency": i.urgency,
+                            "source_document": i.source_document,
+                        }
+                        for i in all_items
                     ],
+                    "conflicts": new_conflicts,
                 },
                 actor=actor,
             )
-        capex_applied = capex_total
 
     session.phase_advance("analyze_document")
 
@@ -616,7 +795,10 @@ def perform_analyze_document(
         "images_reviewed": analysis.images_reviewed,
         "answered_topics": answered_topics,
         "still_open_topics": still_open,
-        "immediate_capex": str(capex_applied),
+        "immediate_capex": str(capex_total),
+        "capex_items": [i.item for i in all_items],
+        "rejected_capex": rejections,
+        "capex_conflicts": capex_conflicts,
         "red_flags": list(analysis.red_flags),
         "next_step": "call underwrite",
     }
@@ -854,6 +1036,77 @@ def diligence_items_from(report: SkepticReport | None) -> list[dict[str, Any]]:
     ]
 
 
+#: Tokens that carry no topic meaning; they would let a short poisoned item "match" anything.
+_MATCH_STOPWORDS = frozenset(
+    """a an and are as at be by can could do does for from has have how in is it its may of on or
+    please provide send show that the there this to us was we what when where which who why will
+    with would you your""".split()
+)
+
+#: How much of the shorter phrase must be shared before a model item counts as the same ask.
+DILIGENCE_MATCH_THRESHOLD = 0.6
+
+_WORD_RE = re.compile(r"[a-z0-9]+")
+
+
+def _match_tokens(text: str) -> set[str]:
+    """Case-folded, punctuation-stripped content words. Falls back to raw tokens if all are stopwords."""
+    tokens = set(_WORD_RE.findall((text or "").casefold()))
+    content = tokens - _MATCH_STOPWORDS
+    return content or tokens
+
+
+def _overlap(left: set[str], right: set[str]) -> float:
+    if not left or not right:
+        return 0.0
+    return len(left & right) / min(len(left), len(right))
+
+
+def diligence_items_match(proposed: dict[str, Any], derived: dict[str, Any]) -> bool:
+    """True when a model-proposed item is asking the same thing as a skeptic-derived item."""
+    proposed_topic = _match_tokens(str(proposed.get("topic", "")))
+    proposed_question = _match_tokens(str(proposed.get("question", "")))
+    derived_topic = _match_tokens(str(derived.get("topic", "")))
+    derived_question = _match_tokens(str(derived.get("question", "")))
+    return any(
+        _overlap(left, right) >= DILIGENCE_MATCH_THRESHOLD
+        for left, right in (
+            (proposed_topic, derived_topic),
+            (proposed_question, derived_question),
+            (proposed_topic, derived_question),
+            (proposed_question, derived_topic),
+        )
+    )
+
+
+def reconcile_diligence_items(
+    proposed: list[dict[str, Any]], report: SkepticReport | None
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Reduce the model's items to the skeptic's own concerns. Returns (accepted, dropped).
+
+    The model reads untrusted broker text, so what it asks the broker is not its decision: the set of
+    legitimate questions is whatever `diligence_items_from` derives from the skeptic report. A model
+    item is only a *selector* over that set -- the text that actually reaches the broker is always the
+    skeptic-derived wording, so an injected instruction cannot become an outbound question. Items that
+    select nothing are dropped and reported; if nothing the model passed selects anything, the whole
+    derived set is chased instead of nothing.
+    """
+    derived = diligence_items_from(report)
+    if not derived:
+        return [], [{**item, "reason": "the skeptic raised no chaseable concern"} for item in proposed]
+    accepted = [
+        item for item in derived if any(diligence_items_match(p, item) for p in proposed)
+    ]
+    dropped = [
+        {**item, "reason": "no matching concern in this message's skeptic report"}
+        for item in proposed
+        if not any(diligence_items_match(item, d) for d in derived)
+    ]
+    if not accepted:
+        accepted = derived
+    return accepted, dropped
+
+
 def perform_request_diligence(
     session: ProcessingSession, items: list[dict[str, Any]], *, actor: Actor = Actor.AGENT
 ) -> dict[str, Any]:
@@ -874,19 +1127,28 @@ def perform_request_diligence(
         return {"skipped": "underwrite has not run for this message"}
     if opp.status != OpportunityStatus.REVIEW:
         return {"skipped": f"status is {opp.status.value}; diligence is only chased on REVIEW opportunities"}
+    if session.skeptic_report is None:
+        return {
+            "skipped": (
+                "no skeptic review ran for this message; diligence is derived from the skeptic's "
+                "concerns, so call request_skeptic_review first"
+            )
+        }
 
-    cleaned = [
+    proposed = [
         {
             "topic": str(item.get("topic", "")).strip(),
             "question": str(item.get("question", "")).strip(),
-            "category": item.get("category") or "document",
-            "source_concern": item.get("source_concern") or item.get("topic"),
         }
         for item in items
         if str(item.get("topic", "")).strip() and str(item.get("question", "")).strip()
     ]
+    cleaned, dropped = reconcile_diligence_items(proposed, session.skeptic_report)
     if not cleaned:
-        return {"skipped": "no diligence items with both a topic and a question"}
+        return {
+            "skipped": "no diligence items: the skeptic report carries no concern with a broker question",
+            "dropped": dropped,
+        }
 
     diligence = diligence_module()
     requests = diligence.build_requests(
@@ -921,6 +1183,7 @@ def perform_request_diligence(
             "topics": [r.topic for r in requests],
             "draft_id": draft.draft_id,
             "draft_status": draft.status,
+            "dropped_items": dropped,
         },
         actor=actor,
     )
@@ -929,6 +1192,7 @@ def perform_request_diligence(
     return {
         "request_ids": [r.request_id for r in requests],
         "topics": [r.topic for r in requests],
+        "dropped": dropped,
         "draft_id": draft.draft_id,
         "status": draft.status,
         "awaiting_approval": awaiting,
@@ -983,14 +1247,20 @@ def perform_request_price_adjustment(
         return {"skipped": "underwrite has not run for this message"}
 
     frontier = run.viability.max_viable_price
+    # A credit request needs something that happened in THIS message to justify it: the deal fell out
+    # of REVIEW, or a document / a price change moved a NEAR-or-WATCH deal. Without that gate the
+    # model can negotiate against any stale deal in the book just by being asked to.
+    new_evidence = bool(session.analyses) or EventType.ASKING_PRICE_CHANGED in session.event_types_created
     eligible = session.threshold_lost or (
-        run.status in (OpportunityStatus.NEAR, OpportunityStatus.WATCH) and frontier is not None
+        run.status in (OpportunityStatus.NEAR, OpportunityStatus.WATCH)
+        and frontier is not None
+        and new_evidence
     )
     if not eligible:
         return {
             "skipped": (
-                f"status is {run.status.value} and the deal did not fall out of REVIEW; "
-                "there is nothing to ask a credit for"
+                f"status is {run.status.value}, the deal did not fall out of REVIEW, and this message "
+                "produced no document analysis and no price change; there is nothing to ask a credit for"
             )
         }
     if frontier is None:
@@ -1083,6 +1353,123 @@ def build_alert(session: ProcessingSession, opp: Opportunity, kind: str) -> Noti
     )
 
 
+def find_notification(session: ProcessingSession, dedupe_key: str) -> Notification | None:
+    """The stored notification under this dedupe key, if the repo has one."""
+    if session.opportunity_id is None:  # pragma: no cover - defensive
+        return None
+    try:
+        stored = session.repo.list_notifications(opportunity_id=session.opportunity_id)
+    except Exception:  # pragma: no cover - a repo that cannot list is not a reason to alert twice
+        logger.exception("could not list notifications for %s", session.opportunity_id)
+        return None
+    return next((n for n in stored if n.dedupe_key == dedupe_key), None)
+
+
+def deliver_notification(
+    session: ProcessingSession,
+    notification: Notification,
+    *,
+    kind: str,
+    note: str = "",
+    actor: Actor = Actor.AGENT,
+) -> dict[str, Any]:
+    """Send an already-persisted notification and record what actually happened.
+
+    Delivery is "the notifier returned"; a notifier that raises did not deliver, and saying otherwise
+    is how a human silently misses the one interruption that mattered. On failure the stored row stays
+    `delivered=False` (body untouched, so a retry sends the same alert), the error becomes a NOTE on
+    the deal, and the exception is re-raised so the tool guard and the safety net both record it.
+    """
+    try:
+        delivery_ref = session.notifier.send(notification)
+    except Exception as exc:
+        error = f"notification delivery failed: {type(exc).__name__}: {exc}"
+        notification.delivered = False
+        notification.delivery_ref = None
+        session.undelivered_notification = notification
+        session.notification_error = error
+        try:
+            session.repo.update_notification(notification)
+        except Exception:  # pragma: no cover - repo failure during error handling
+            logger.exception("could not mark notification %s undelivered", notification.notification_id)
+        try:
+            session.append_event(
+                EventType.NOTE,
+                f"{error}; the alert is stored undelivered and will be retried",
+                {
+                    "notification_id": notification.notification_id,
+                    "dedupe_key": notification.dedupe_key,
+                    "kind": kind,
+                    "delivered": False,
+                    "error": error,
+                },
+                actor=actor,
+            )
+        except Exception:  # pragma: no cover - repo failure during error handling
+            logger.exception("could not record the delivery failure as an event")
+        raise
+
+    notification.delivered = True
+    notification.delivery_ref = delivery_ref
+    session.repo.update_notification(notification)
+    session.notification = notification
+    session.undelivered_notification = None
+    session.notification_error = None
+
+    session.append_event(
+        EventType.HUMAN_NOTIFIED,
+        f"Human notified: {notification.title}",
+        {
+            "notification_id": notification.notification_id,
+            "kind": kind,
+            "dedupe_key": notification.dedupe_key,
+            "channel": notification.channel.value,
+            "delivered": True,
+            "delivery_ref": delivery_ref,
+            "note": note,
+        },
+        actor=actor,
+    )
+
+    return {
+        "notification_id": notification.notification_id,
+        "kind": kind,
+        "delivered": True,
+        "delivery_ref": delivery_ref,
+        "channel": notification.channel.value,
+        "title": notification.title,
+    }
+
+
+def resume_undelivered_notifications(
+    session: ProcessingSession, *, actor: Actor = Actor.SYSTEM
+) -> dict[str, Any]:
+    """Deliver alerts whose intent was recorded but whose delivery never completed (R3/G3).
+
+    The dedupe row means "we tried", not "the human knows". A re-run of the message -- or the next
+    message on the deal -- finishes the delivery it started rather than treating it as handled.
+    """
+    if session.opportunity_id is None:
+        return {"resumed": 0}
+    try:
+        stored = session.repo.list_notifications(opportunity_id=session.opportunity_id)
+    except Exception:  # pragma: no cover - defensive
+        logger.exception("could not list notifications for %s", session.opportunity_id)
+        return {"resumed": 0}
+
+    resumed: list[str] = []
+    for notification in [n for n in stored if not n.delivered]:
+        deliver_notification(
+            session,
+            notification,
+            kind=notification.kind,
+            note="Delivery resumed: this alert was recorded but never reached you.",
+            actor=actor,
+        )
+        resumed.append(notification.notification_id)
+    return {"resumed": len(resumed), "notification_ids": resumed}
+
+
 def perform_notify_human(
     session: ProcessingSession, note: str = "", *, actor: Actor = Actor.AGENT
 ) -> dict[str, Any]:
@@ -1092,8 +1479,8 @@ def perform_notify_human(
     after diligence. Everything else stays silent.
 
     R3, intent before delivery: the `Notification` is persisted with `delivered=False` under a unique
-    `dedupe_key` *before* anything is sent. If storage fails afterwards the record still exists, so a
-    retry or the safety net sees the duplicate key and skips instead of alerting the human twice.
+    `dedupe_key` *before* anything is sent. A duplicate key that is already delivered means "handled,
+    do not alert twice"; a duplicate key that was never delivered means "finish what was started".
     """
     if session.threshold_crossed:
         kind = "threshold_crossed"
@@ -1120,40 +1507,15 @@ def perform_notify_human(
     try:
         session.repo.store_notification(notification)
     except duplicate_notification_error():
-        logger.info("notification %s already recorded; not alerting again", notification.dedupe_key)
-        return {"skipped": f"already handled: a {kind} alert exists for this run"}
+        existing = find_notification(session, notification.dedupe_key)
+        if existing is None or existing.delivered:
+            logger.info("notification %s already delivered; not alerting again", notification.dedupe_key)
+            return {"skipped": f"already handled: a {kind} alert exists for this run"}
+        logger.info("notification %s was never delivered; resuming it", notification.dedupe_key)
+        notification = existing
 
-    session.notification = notification
     session.phase_advance("notify_human")
-
-    delivery_ref = session.notifier.send(notification)
-    notification.delivered = delivery_ref is not None
-    notification.delivery_ref = delivery_ref
-    session.repo.update_notification(notification)
-
-    session.append_event(
-        EventType.HUMAN_NOTIFIED,
-        f"Human notified: {notification.title}",
-        {
-            "notification_id": notification.notification_id,
-            "kind": kind,
-            "dedupe_key": notification.dedupe_key,
-            "channel": notification.channel.value,
-            "delivered": notification.delivered,
-            "delivery_ref": delivery_ref,
-            "note": note,
-        },
-        actor=actor,
-    )
-
-    return {
-        "notification_id": notification.notification_id,
-        "kind": kind,
-        "delivered": notification.delivered,
-        "delivery_ref": delivery_ref,
-        "channel": notification.channel.value,
-        "title": notification.title,
-    }
+    return deliver_notification(session, notification, kind=kind, note=note, actor=actor)
 
 
 # --------------------------------------------------------------------------- tool factory
@@ -1208,15 +1570,18 @@ def make_tools(session: ProcessingSession) -> list[Any]:
 
         Use this for every PDF or image attached to the message, before underwriting. The inspector
         agent produces findings with page and photo provenance, answers to whichever diligence
-        questions the document settles, and any capital work it prices. Day-one capital work changes
-        the basis the next underwriting run uses, so always call underwrite afterwards.
+        questions the document settles, and any capital work it prices. Every capex figure is checked
+        against the document's own text before it counts; unverifiable ones are rejected and returned
+        under "rejected_capex". Day-one capital work changes the basis the next underwriting run uses,
+        so always call underwrite afterwards.
 
         Args:
             filename: The exact attachment filename to read.
 
         Returns:
             The document type, how many findings and images it produced, which open diligence topics
-            it answered, which are still open, the immediate capex it established, and the next step.
+            it answered, which are still open, the immediate capex now established for the whole
+            opportunity, any rejected capex, and the next step.
         """
         return _guard("analyze_document", lambda: perform_analyze_document(session, filename))
 
@@ -1252,18 +1617,21 @@ def make_tools(session: ProcessingSession) -> list[Any]:
     def request_diligence(items: list[DiligenceItem]) -> dict:
         """Start chasing the broker for the evidence this deal is missing.
 
-        Only allowed on a REVIEW opportunity, once per message. Each item becomes a tracked
-        diligence request that is followed up on the policy cadence until it is answered. Pass the
-        skeptic's concerns that carry a question for the broker (missing, weak or unverified evidence) for the
-        broker -- nothing else. The message itself is composed and screened in code; whether it is
-        sent now or waits for a human tap is the outreach policy's decision, not yours.
+        Only allowed on a REVIEW opportunity that had a skeptic review in this message, once per
+        message. Pass the skeptic's concerns that carry a question for the broker -- nothing else:
+        the code reconciles your items against that report, chases the skeptic's own wording, and
+        drops anything that does not correspond to one of its concerns (they come back under
+        "dropped"). Each surviving item becomes a tracked request, followed up on the policy cadence
+        until it is answered. Whether the message is sent now or waits for a human tap is the
+        outreach policy's decision, not yours.
 
         Args:
             items: The questions to chase, each with a short topic and one specific question.
 
         Returns:
-            The request ids and topics, the draft id, whether it is awaiting approval, and the
-            outbox reference when it was sent. Returns {"skipped": reason} when it is not warranted.
+            The request ids and topics actually raised, the items that were dropped, the draft id,
+            whether it is awaiting approval, and the outbox reference when it was sent. Returns
+            {"skipped": reason} when it is not warranted.
         """
         payload = [i if isinstance(i, dict) else i.model_dump() for i in items]
         return _guard("request_diligence", lambda: perform_request_diligence(session, payload))
@@ -1273,7 +1641,8 @@ def make_tools(session: ProcessingSession) -> list[Any]:
         """Draft a price-credit request for a deal that diligence pushed back out of reach.
 
         Only allowed when this message's underwriting fell out of REVIEW, or left the deal NEAR or
-        WATCH with a viability frontier. This is money talk: the draft always waits for explicit
+        WATCH with a viability frontier AND this message brought something new -- a document you
+        analyzed or a change in the asking price. This is money talk: the draft always waits for explicit
         human approval, and nothing is sent. The code recomputes the credit from the stored frontier
         and will override your figure if it is more than 25% away from it.
 
@@ -1320,18 +1689,25 @@ def make_tools(session: ProcessingSession) -> list[Any]:
 __all__ = [
     "CREDIT_ROUNDING",
     "CREDIT_TOLERANCE",
+    "DILIGENCE_MATCH_THRESHOLD",
     "OPEN_REQUEST_STATUSES",
     "PHASE_ORDER_TEXT",
     "REPEATABLE_TOOLS",
     "TOOL_RANK",
     "DiligenceItem",
     "ProcessingSession",
+    "aggregate_capex_items",
     "build_alert",
+    "capex_rejection_reason",
+    "deliver_notification",
     "diligence_items_from",
+    "diligence_items_match",
     "diligence_module",
+    "document_amounts",
     "duplicate_notification_error",
     "evidence_from_findings",
     "find_attachment",
+    "find_notification",
     "finding_location",
     "make_tools",
     "perform_analyze_document",
@@ -1341,6 +1717,9 @@ __all__ = [
     "perform_request_price_adjustment",
     "perform_skeptic_review",
     "perform_underwrite",
+    "reconcile_diligence_items",
+    "resume_undelivered_notifications",
     "suggested_credit",
     "suggested_questions",
+    "verify_capex_items",
 ]
