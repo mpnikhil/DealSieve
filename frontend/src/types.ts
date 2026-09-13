@@ -244,6 +244,33 @@ export interface SkepticReport {
 
 export type OutboundKind = 'information_request' | 'follow_up' | 'credit_request' | 'offer' | 'other';
 
+export type MemoryKind = 'decision' | 'broker' | 'alert' | 'note';
+
+export interface MemoryEvent {
+  memory_event_id: string;
+  namespace: string;
+  kind: MemoryKind;
+  actor: string;
+  opportunity_id: string | null;
+  deal_number: number | null;
+  broker_email: string | null;
+  text: string;
+  payload: Record<string, any>;
+  created_at: string;
+  store: string | null;
+  external_id: string | null;
+}
+
+export interface MemoryHit {
+  memory_event_id: string;
+  namespace: string;
+  kind: MemoryKind;
+  text: string;
+  score: number;
+  created_at: string;
+  payload: Record<string, any>;
+}
+
 export interface OutboundDraft {
   draft_id: string;
   opportunity_id: string;
@@ -381,4 +408,5 @@ export interface OpportunityDetail {
   diligence_requests: DiligenceRequest[];
   document_analyses: DocumentAnalysis[];
   inbound_messages: InboundMessage[];
+  memories: MemoryHit[];
 }

@@ -79,7 +79,7 @@ export function DiligencePanel({ requests }: { requests: DiligenceRequest[] }) {
   );
 }
 
-export function CorrespondencePanel({ inbound, outbound, onApprove, onReject }: { inbound: InboundMessage[], outbound: OutboundDraft[], onApprove: (id: string) => void, onReject: (id: string) => void }) {
+export function CorrespondencePanel({ inbound, outbound, onApprove, onReject }: { inbound: InboundMessage[], outbound: OutboundDraft[], onApprove: (id: string) => void, onReject: (id: string, reason?: string) => void }) {
   const items = [
     ...inbound.map(i => ({ type: 'in', date: i.received_at, data: i })),
     ...outbound.map(o => ({ type: 'out', date: o.created_at, data: o }))
@@ -148,8 +148,10 @@ function InboundItem({ msg }: { msg: InboundMessage }) {
   );
 }
 
-function OutboundItem({ draft, onApprove, onReject }: { draft: OutboundDraft, onApprove: (id: string) => void, onReject: (id: string) => void }) {
+function OutboundItem({ draft, onApprove, onReject }: { draft: OutboundDraft, onApprove: (id: string) => void, onReject: (id: string, reason?: string) => void }) {
   const [expanded, setExpanded] = useState(false);
+  const [rejecting, setRejecting] = useState(false);
+  const [rejectReason, setRejectReason] = useState("");
   
   let statusText = "";
   if (!draft.requires_approval && draft.status === 'sent') statusText = "Auto-sent under policy";
@@ -183,19 +185,110 @@ function OutboundItem({ draft, onApprove, onReject }: { draft: OutboundDraft, on
       </div>
 
       {draft.status === 'pending' && (
-        <div className="mt-4 flex gap-2">
-          <button onClick={() => onApprove(draft.draft_id)} className="px-3 py-1.5 bg-blue-600 text-white text-sm font-medium rounded hover:bg-blue-700 transition">
-            Approve
-          </button>
-          <button onClick={() => onReject(draft.draft_id)} className="px-3 py-1.5 bg-white border border-slate-300 text-slate-700 text-sm font-medium rounded hover:bg-slate-50 transition">
-            Reject
-          </button>
+        <div className="mt-4">
+          {rejecting ? (
+            <div className="flex flex-col gap-2">
+              <input
+                type="text"
+                autoFocus
+                className="w-full text-sm border-slate-300 rounded focus:ring-blue-500 focus:border-blue-500 p-2 border"
+                placeholder="Why? One line, DealSieve will remember it"
+                value={rejectReason}
+                onChange={e => setRejectReason(e.target.value)}
+                onKeyDown={e => {
+                  if (e.key === 'Enter') {
+                    onReject(draft.draft_id, rejectReason);
+                    setRejecting(false);
+                  } else if (e.key === 'Escape') {
+                    setRejecting(false);
+                  }
+                }}
+              />
+              <div className="flex gap-2">
+                <button onClick={() => { onReject(draft.draft_id, rejectReason); setRejecting(false); }} className="px-3 py-1.5 bg-red-600 text-white text-sm font-medium rounded hover:bg-red-700 transition">
+                  Reject
+                </button>
+                <button onClick={() => setRejecting(false)} className="px-3 py-1.5 bg-white border border-slate-300 text-slate-700 text-sm font-medium rounded hover:bg-slate-50 transition">
+                  Cancel
+                </button>
+              </div>
+            </div>
+          ) : (
+            <div className="flex gap-2">
+              <button onClick={() => onApprove(draft.draft_id)} className="px-3 py-1.5 bg-blue-600 text-white text-sm font-medium rounded hover:bg-blue-700 transition">
+                Approve
+              </button>
+              <button onClick={() => setRejecting(true)} className="px-3 py-1.5 bg-white border border-slate-300 text-slate-700 text-sm font-medium rounded hover:bg-slate-50 transition">
+                Reject
+              </button>
+            </div>
+          )}
         </div>
       )}
 
       {draft.status === 'sent' && draft.delivery_ref && (
         <div className="mt-2 text-xs text-slate-400">Delivery ref: {draft.delivery_ref}</div>
       )}
+    </div>
+  );
+}
+
+export function MemoryPanel({ memories }: { memories: import('../types').MemoryHit[] }) {
+  const grouped = memories.reduce((acc, m) => {
+    const prefix = m.namespace.startsWith('investor/') ? 'Your decisions' : 
+                   m.namespace.startsWith('broker/') ? 'This broker' : 'Other';
+    if (!acc[prefix]) acc[prefix] = [];
+    acc[prefix].push(m);
+    return acc;
+  }, {} as Record<string, typeof memories>);
+
+  return (
+    <div className="bg-white border border-slate-200 rounded-lg overflow-hidden shadow-sm">
+      <div className="px-5 py-4 border-b border-slate-200 bg-slate-50">
+        <h2 className="text-base font-semibold text-slate-900">What DealSieve remembers</h2>
+      </div>
+      <div className="p-5">
+        {memories.length === 0 ? (
+          <div className="text-sm text-slate-500 italic">
+            Nothing yet. Approve or reject something and DealSieve will remember why.
+          </div>
+        ) : (
+          <div className="space-y-6">
+            {Object.entries(grouped).map(([group, hits]) => (
+              <div key={group}>
+                <h3 className="text-sm font-semibold text-slate-900 uppercase tracking-wider mb-3">{group}</h3>
+                <div className="space-y-3">
+                  {hits.map(hit => (
+                    <div key={hit.memory_event_id} className="flex flex-col gap-1.5 p-3 border border-slate-100 bg-slate-50 rounded">
+                      <div className="flex justify-between items-start gap-2">
+                        <div className="text-sm text-slate-800">{hit.text}</div>
+                        <span className={cn(
+                          "inline-flex px-1.5 py-0.5 rounded text-[10px] uppercase font-bold tracking-wider shrink-0",
+                          hit.kind === 'decision' ? 'bg-indigo-100 text-indigo-700' :
+                          hit.kind === 'broker' ? 'bg-amber-100 text-amber-700' :
+                          hit.kind === 'alert' ? 'bg-red-100 text-red-700' :
+                          'bg-slate-200 text-slate-700'
+                        )}>
+                          {hit.kind}
+                        </span>
+                      </div>
+                      <div className="flex items-center justify-between text-xs text-slate-500">
+                        <span>{formatRelativeTime(hit.created_at)}</span>
+                        <div className="flex items-center gap-1.5">
+                          <span className="text-[10px]">Score {(hit.score * 100).toFixed(0)}</span>
+                          <div className="w-12 h-1 bg-slate-200 rounded-full overflow-hidden">
+                            <div className="h-full bg-blue-400" style={{ width: `${hit.score * 100}%` }} />
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
     </div>
   );
 }

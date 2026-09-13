@@ -4,7 +4,7 @@ import { ChevronLeft, CheckCircle2, XCircle } from 'lucide-react';
 import { fetchOpportunity, approveDraft, rejectDraft } from '../api';
 import type { OpportunityDetail } from '../types';
 import { StatusPill, cn } from '../components/StatusPill';
-import { DiligencePanel, CorrespondencePanel, DocumentsPanel } from '../components/DealPanels';
+import { DiligencePanel, CorrespondencePanel, DocumentsPanel, MemoryPanel } from '../components/DealPanels';
 import { formatMoney, formatRate, formatDSCR, formatRelativeTime, formatConstraintLabel } from '../utils/format';
 
 export function DealDetail() {
@@ -31,10 +31,10 @@ export function DealDetail() {
     return () => { active = false; };
   }, [id]);
 
-  const handleDraftAction = async (draftId: string, action: 'approve' | 'reject') => {
+  const handleDraftAction = async (draftId: string, action: 'approve' | 'reject', reason?: string) => {
     if (!detail) return;
     try {
-      const updatedDraft = action === 'approve' ? await approveDraft(draftId) : await rejectDraft(draftId);
+      const updatedDraft = action === 'approve' ? await approveDraft(draftId) : await rejectDraft(draftId, reason);
       setDetail({
         ...detail,
         drafts: detail.drafts.map(d => d.draft_id === draftId ? updatedDraft : d)
@@ -48,7 +48,7 @@ export function DealDetail() {
   if (loading) return <div className="p-8 text-slate-500">Loading deal...</div>;
   if (error || !detail) return <div className="p-8 text-red-500">{error || 'Deal not found'}</div>;
 
-  const { opportunity, property, latest_run, events, evidence, skeptic_reports, drafts, diligence_requests, document_analyses, inbound_messages, notifications } = detail;
+  const { opportunity, property, latest_run, events, evidence, skeptic_reports, drafts, diligence_requests, document_analyses, inbound_messages, notifications, memories } = detail;
   const latestNotification = notifications.length > 0 ? notifications[notifications.length - 1] : null;
   let attentionReason = "none";
   if (latestNotification) {
@@ -204,6 +204,8 @@ export function DealDetail() {
             </div>
           )}
 
+          <MemoryPanel memories={memories || []} />
+
           {/* New Panels */}
           <DiligencePanel requests={diligence_requests || []} />
           
@@ -211,7 +213,7 @@ export function DealDetail() {
             inbound={inbound_messages || []} 
             outbound={drafts || []} 
             onApprove={(id) => handleDraftAction(id, 'approve')} 
-            onReject={(id) => handleDraftAction(id, 'reject')} 
+            onReject={(id, reason) => handleDraftAction(id, 'reject', reason)} 
           />
           
           <DocumentsPanel docs={document_analyses || []} />

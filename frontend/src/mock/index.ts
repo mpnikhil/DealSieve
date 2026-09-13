@@ -763,5 +763,99 @@ export const mockOpportunityDetail: OpportunityDetail = {
       model_backend: "claude",
       created_at: new Date(Date.now() - 1000 * 60 * 60 * 0.9).toISOString()
     }
+  ],
+  memories: [
+    {
+      memory_event_id: "mem_2",
+      namespace: "broker/maya.chen@brokerage.example",
+      kind: "broker",
+      text: "Never provides CAM reconciliations upfront.",
+      score: 0.82,
+      created_at: new Date(Date.now() - 1000 * 60 * 60 * 24 * 30).toISOString(),
+      payload: { topic: "cam", outcome: "missing" }
+    }
   ]
 };
+
+export const mockMemoryEvents = [
+  {
+    memory_event_id: "mem_1",
+    namespace: "investor/human:local",
+    kind: "decision",
+    actor: "human:local",
+    opportunity_id: "opp_113",
+    deal_number: 113,
+    broker_email: null,
+    text: "Rejected a $42,000 roof credit on #113; wants a contractor bid before pricing roof work",
+    payload: { action: "reject_credit", amount: 42000, context: "roof" },
+    created_at: new Date(Date.now() - 1000 * 60 * 60 * 24 * 5).toISOString(),
+    store: "local",
+    external_id: null
+  },
+  {
+    memory_event_id: "mem_2",
+    namespace: "broker/maya.chen@brokerage.example",
+    kind: "broker",
+    actor: "system",
+    opportunity_id: null,
+    deal_number: null,
+    broker_email: "maya.chen@brokerage.example",
+    text: "Never provides CAM reconciliations upfront.",
+    payload: { topic: "cam", outcome: "missing" },
+    created_at: new Date(Date.now() - 1000 * 60 * 60 * 24 * 30).toISOString(),
+    store: "local",
+    external_id: null
+  },
+  {
+    memory_event_id: "mem_3",
+    namespace: "broker/maya.chen@brokerage.example",
+    kind: "broker",
+    actor: "system",
+    opportunity_id: null,
+    deal_number: null,
+    broker_email: "maya.chen@brokerage.example",
+    text: "Responsive to information requests within 24 hours.",
+    payload: { response_time: "fast" },
+    created_at: new Date(Date.now() - 1000 * 60 * 60 * 24 * 45).toISOString(),
+    store: "local",
+    external_id: null
+  },
+  {
+    memory_event_id: "mem_4",
+    namespace: "investor/human:local",
+    kind: "decision",
+    actor: "human:local",
+    opportunity_id: "opp_108",
+    deal_number: 108,
+    broker_email: null,
+    text: "Approved sending offer at 85% of asking.",
+    payload: { action: "approve_offer", pct: 0.85 },
+    created_at: new Date(Date.now() - 1000 * 60 * 60 * 24 * 10).toISOString(),
+    store: "local",
+    external_id: null
+  },
+  {
+    memory_event_id: "mem_5",
+    namespace: "investor/human:local",
+    kind: "alert",
+    actor: "human:local",
+    opportunity_id: "opp_110",
+    deal_number: 110,
+    broker_email: null,
+    text: "Ignored threshold alert for distribution center.",
+    payload: { action: "ignore_alert" },
+    created_at: new Date(Date.now() - 1000 * 60 * 60 * 24 * 2).toISOString(),
+    store: "local",
+    external_id: null
+  }
+];
+
+export const mockMemoryHits = mockMemoryEvents.map(e => ({
+  memory_event_id: e.memory_event_id,
+  namespace: e.namespace,
+  kind: e.kind,
+  text: e.text,
+  score: 0.75 + Math.random() * 0.2, // mock score between 0.75 and 0.95
+  created_at: e.created_at,
+  payload: e.payload
+}));

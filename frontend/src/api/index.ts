@@ -53,17 +53,45 @@ export async function approveDraft(draftId: string): Promise<OutboundDraft> {
   return res.json();
 }
 
-export async function rejectDraft(draftId: string): Promise<OutboundDraft> {
+export async function rejectDraft(draftId: string, reason?: string): Promise<OutboundDraft> {
   if (IS_MOCK) {
     const draft = mockOpportunityDetail.drafts.find(d => d.draft_id === draftId);
     if (!draft) throw new Error('Draft not found');
     return { ...draft, status: 'rejected' };
   }
+  const body = reason ? JSON.stringify({ reason }) : undefined;
   const res = await fetch(`/api/drafts/${draftId}/reject`, {
     method: 'POST',
-    headers: approverHeaders()
+    headers: {
+      ...approverHeaders(),
+      ...(body ? { 'Content-Type': 'application/json' } : {})
+    },
+    body
   });
   if (!res.ok) throw new Error('Failed to reject draft');
+  return res.json();
+}
+
+export async function fetchMemory(namespace?: string, q?: string) {
+  if (IS_MOCK) {
+    const { mockMemoryEvents, mockMemoryHits } = await import('../mock');
+    let events = [...mockMemoryEvents];
+    if (namespace) {
+      events = events.filter(e => e.namespace.startsWith(namespace));
+    }
+    if (q) {
+      return mockMemoryHits.filter(e => 
+        (!namespace || e.namespace.startsWith(namespace)) &&
+        e.text.toLowerCase().includes(q.toLowerCase())
+      );
+    }
+    return events;
+  }
+  const params = new URLSearchParams();
+  if (namespace) params.set('namespace', namespace);
+  if (q) params.set('q', q);
+  const res = await fetch(`/api/memory?${params.toString()}`);
+  if (!res.ok) throw new Error('Failed to fetch memory');
   return res.json();
 }
 
