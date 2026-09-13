@@ -130,7 +130,7 @@ def _deal_context(opportunity: Opportunity) -> str:
     if wv is not None and wv.capex_items:
         names = []
         for item in wv.capex_items:
-            head = item.item.split("(")[0].strip().rstrip(",")
+            head = re.split(r"[(,;]", item.item)[0].strip()
             if head and head.lower() not in (n.lower() for n in names):
                 names.append(head)
         if names:
@@ -153,8 +153,8 @@ def _decision_text(
 
     if draft.kind == "credit_request":
         amount = _credit_amount(draft)
-        amount_text = f"${amount:,.0f}" if amount is not None else "a"
-        text = f"{verb} a {amount_text} credit request{broker} on {deal}"
+        what = f"a ${amount:,.0f} credit request" if amount is not None else "a credit request"
+        text = f"{verb} {what}{broker} on {deal}"
         details = [d for d in (context, _approved_credit_detail(opportunity) if outcome == "approved" else None) if d]
         text += f" ({'; '.join(details)})." if details else "."
         if outcome == "rejected" and reason:

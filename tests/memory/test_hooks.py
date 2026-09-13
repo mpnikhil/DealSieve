@@ -112,7 +112,7 @@ def test_approve_and_send_remembers_the_approved_credit_decision(repo: Repo, pol
     texts = _memory_texts(repo, investor_namespace("human:local"))
     assert (
         "Approved a $42,000 credit request to maya.chen@brokerage.example on deal #113 "
-        "(roof capex $90,000; NEAR, 3.4% under ask)."
+        "(Power Inn; capex: Roof replacement; roof capex $90,000; NEAR, 3.4% under ask)."
     ) in texts
 
 
