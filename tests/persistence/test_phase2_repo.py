@@ -48,32 +48,33 @@ def _set_updated_at(repo, message_id: str, when: datetime) -> None:
 # --------------------------------------------------------------------------- claim_message (R4)
 
 
-def test_claim_message_stores_message_and_returns_true_on_first_sight(repo):
+def test_claim_message_stores_message_and_returns_claimed_on_first_sight(repo):
     msg = InboundMessage(message_id="m1", channel=Channel.EMAIL, body_text="hi", subject="s", thread_id="m1")
-    assert repo.claim_message(msg) is True
+    assert repo.claim_message(msg) == "claimed"
     stored = repo.get_message("m1")
     assert stored == msg
 
 
-def test_claim_message_returns_false_while_actively_processing(repo):
+def test_claim_message_returns_in_flight_while_actively_processing(repo):
     msg = InboundMessage(message_id="m1", channel=Channel.EMAIL, body_text="hi")
-    assert repo.claim_message(msg) is True
+    assert repo.claim_message(msg) == "claimed"
     # Not stale -- someone else (or this same in-flight call) owns it right now.
-    assert repo.claim_message(msg) is False
+    assert repo.claim_message(msg) == "in_flight"
 
 
-def test_claim_message_returns_false_once_completed(repo):
+def test_claim_message_returns_completed_once_completed(repo):
     msg = InboundMessage(message_id="m1", channel=Channel.EMAIL, body_text="hi")
-    assert repo.claim_message(msg) is True
+    assert repo.claim_message(msg) == "claimed"
     repo.mark_message_completed("m1")
-    assert repo.claim_message(msg) is False
+    assert repo.claim_message(msg) == "completed"
+    assert repo.message_status("m1") == "completed"
 
 
 def test_claim_message_claims_a_received_row_stored_by_legacy_path(repo):
     msg = InboundMessage(message_id="m1", channel=Channel.EMAIL, body_text="hi")
     repo.store_inbound_message(msg)
 
-    assert repo.claim_message(msg) is True
+    assert repo.claim_message(msg) == "claimed"
     row = repo._conn.execute(
         "SELECT status FROM inbound_messages WHERE message_id = ?", (msg.message_id,)
     ).fetchone()
@@ -84,7 +85,7 @@ def test_claim_message_reclaims_failed_message(repo):
     msg = InboundMessage(message_id="m1", channel=Channel.EMAIL, body_text="hi")
     repo.claim_message(msg)
     repo.mark_message_failed("m1", "boom")
-    assert repo.claim_message(msg) is True
+    assert repo.claim_message(msg) == "claimed"
 
 
 def test_claim_message_reclaims_stale_processing_but_not_fresh(repo):
@@ -92,11 +93,17 @@ def test_claim_message_reclaims_stale_processing_but_not_fresh(repo):
     repo.claim_message(msg)  # status=processing, updated_at=now
 
     # Fresh processing row: not reclaimed.
-    assert repo.claim_message(msg) is False
+    assert repo.claim_message(msg) == "in_flight"
 
     # Backdate as if the worker died 40 minutes ago (> 30 minute staleness window).
     _set_updated_at(repo, "m1", datetime.now(UTC) - timedelta(minutes=40))
-    assert repo.claim_message(msg) is True
+    assert repo.claim_message(msg) == "claimed"
+
+
+def test_claim_message_bool_shim_preserves_legacy_contract(repo):
+    msg = InboundMessage(message_id="m1", channel=Channel.EMAIL, body_text="hi")
+    assert repo.claim_message_bool(msg) is True
+    assert repo.claim_message_bool(msg) is False
 
 
 def test_mark_message_completed_and_failed_set_status_and_error(repo):
@@ -187,8 +194,12 @@ def test_duplicate_notification_id_is_not_misreported_as_dedupe_clash(repo):
 
 def test_store_notification_allows_multiple_null_dedupe_keys(repo):
     opp = _opportunity(repo)
-    n1 = Notification(opportunity_id=opp.opportunity_id, kind="status_update", channel=Channel.TELEGRAM, title="a", body="a")
-    n2 = Notification(opportunity_id=opp.opportunity_id, kind="status_update", channel=Channel.TELEGRAM, title="b", body="b")
+    n1 = Notification(
+        opportunity_id=opp.opportunity_id, kind="status_update", channel=Channel.TELEGRAM, title="a", body="a"
+    )
+    n2 = Notification(
+        opportunity_id=opp.opportunity_id, kind="status_update", channel=Channel.TELEGRAM, title="b", body="b"
+    )
     repo.store_notification(n1)
     repo.store_notification(n2)  # both dedupe_key=None; must not collide
     assert len(repo.list_notifications(opp.opportunity_id)) == 2
@@ -215,6 +226,23 @@ def test_update_notification_persists_delivered_flag(repo):
     assert reloaded.dedupe_key == "dk1"
 
 
+def test_notification_preserves_private_telegram_draft_target_for_retry(repo):
+    opp = _opportunity(repo)
+    notification = Notification(
+        opportunity_id=opp.opportunity_id,
+        kind="threshold_crossed",
+        channel=Channel.TELEGRAM,
+        title="t",
+        body="b",
+    )
+    object.__setattr__(notification, "_telegram_draft_id", "drf_exact")
+
+    repo.store_notification(notification)
+
+    reloaded = repo.get_notification(notification.notification_id)
+    assert reloaded.__dict__["_telegram_draft_id"] == "drf_exact"
+
+
 # --------------------------------------------------------------------------- diligence_requests
 
 
@@ -235,6 +263,24 @@ def test_transition_draft_is_atomic_compare_and_swap(repo):
     # The internal sending lease never leaks an invalid status through the shared schema.
     assert repo.get_draft(draft.draft_id).status == "approved"
     assert repo.transition_draft(draft.draft_id, "sending", "approved") is True
+
+
+def test_store_draft_upserts_by_draft_id_without_resetting_failure_count(repo):
+    opp = _opportunity(repo)
+    draft = OutboundDraft(
+        opportunity_id=opp.opportunity_id,
+        to_email="broker@example.com",
+        subject="Questions",
+        body="Roof age?",
+    )
+    repo.store_draft(draft)
+    assert repo.record_draft_delivery_failure(draft.draft_id) == 1
+
+    revised = draft.model_copy(update={"subject": "Diligence questions: Test deal"})
+    repo.store_draft(revised)
+
+    assert repo.get_draft(draft.draft_id).subject == revised.subject
+    assert repo.draft_delivery_failures(draft.draft_id) == 1
 
 
 def test_reserve_follow_up_checks_status_count_and_due_date(repo):
@@ -259,7 +305,9 @@ def test_reserve_follow_up_checks_status_count_and_due_date(repo):
 
 def test_diligence_request_round_trip_update_and_get(repo):
     opp = _opportunity(repo)
-    req = DiligenceRequest(opportunity_id=opp.opportunity_id, topic="Roof age", question="How old is the roof?")
+    req = DiligenceRequest(
+        opportunity_id=opp.opportunity_id, topic="Roof age", question="How old is the roof?"
+    )
     repo.store_diligence_request(req)
 
     assert repo.get_diligence_request(req.request_id) == req
@@ -301,20 +349,47 @@ def test_list_diligence_requests_filters_by_opportunity_and_status_ordered_by_cr
     assert {r.request_id for r in everything} == {r1.request_id, r2.request_id, r3.request_id}
 
 
-def test_open_diligence_count_counts_sent_and_overdue_only(repo):
+def test_overdue_is_projected_without_persisting_status(repo):
+    opp = _opportunity(repo)
+    due = datetime.now(UTC) - timedelta(minutes=1)
+    request = DiligenceRequest(
+        opportunity_id=opp.opportunity_id,
+        topic="Roof",
+        question="Age?",
+        status="sent",
+        due_at=due,
+    )
+    repo.store_diligence_request(request)
+
+    assert repo.get_diligence_request(request.request_id).status == "sent"
+    assert repo.list_diligence_requests(status="overdue")[0].status == "overdue"
+    stored = repo._conn.execute(
+        "SELECT status FROM diligence_requests WHERE request_id = ?", (request.request_id,)
+    ).fetchone()
+    assert stored["status"] == "sent"
+    assert repo.opportunity_detail(opp.opportunity_id).diligence_requests[0].status == "overdue"
+
+
+def test_open_diligence_count_counts_stored_sent_and_normalizes_overdue_writes(repo):
     opp = _opportunity(repo)
     statuses = ["draft", "sent", "overdue", "answered", "stalled", "withdrawn"]
     for i, status in enumerate(statuses):
         repo.store_diligence_request(
-            DiligenceRequest(opportunity_id=opp.opportunity_id, topic=f"topic{i}", question="q", status=status)
+            DiligenceRequest(
+                opportunity_id=opp.opportunity_id, topic=f"topic{i}", question="q", status=status
+            )
         )
-    assert repo.open_diligence_count() == 2  # sent + overdue
+    assert repo.open_diligence_count() == 2  # both stored as sent
 
 
 def test_dashboard_stats_fills_open_diligence_requests(repo):
     opp = _opportunity(repo)
-    repo.store_diligence_request(DiligenceRequest(opportunity_id=opp.opportunity_id, topic="Roof", question="q", status="sent"))
-    repo.store_diligence_request(DiligenceRequest(opportunity_id=opp.opportunity_id, topic="HVAC", question="q", status="answered"))
+    repo.store_diligence_request(
+        DiligenceRequest(opportunity_id=opp.opportunity_id, topic="Roof", question="q", status="sent")
+    )
+    repo.store_diligence_request(
+        DiligenceRequest(opportunity_id=opp.opportunity_id, topic="HVAC", question="q", status="answered")
+    )
 
     stats = repo.dashboard_stats("policy_v1")
     assert stats.open_diligence_requests == 1
@@ -331,7 +406,11 @@ def test_document_analysis_round_trip(repo):
         filename="report.pdf",
         document_type="inspection_report",
         summary="Roof needs replacement.",
-        findings=[DocumentFinding(topic="Roof age", value="2001", severity="high", confidence=0.9, page=3, image_ref="image 1")],
+        findings=[
+            DocumentFinding(
+                topic="Roof age", value="2001", severity="high", confidence=0.9, page=3, image_ref="image 1"
+            )
+        ],
         answers=[RequestAnswer(request_topic="Roof age", answer="Built 2001", resolves=True)],
         images_reviewed=2,
         image_paths=["data/documents/abc/img_1.png", "data/documents/abc/img_2.png"],
@@ -349,16 +428,27 @@ def test_list_document_analyses_ordered_by_created_at(repo):
     opp = _opportunity(repo)
     t0 = datetime(2026, 9, 15, 9, 0, 0, tzinfo=UTC)
     a1 = DocumentAnalysis(
-        opportunity_id=opp.opportunity_id, message_id="m1", filename="a.pdf",
-        document_type="other", summary="first", created_at=t0,
+        opportunity_id=opp.opportunity_id,
+        message_id="m1",
+        filename="a.pdf",
+        document_type="other",
+        summary="first",
+        created_at=t0,
     )
     a2 = DocumentAnalysis(
-        opportunity_id=opp.opportunity_id, message_id="m2", filename="b.pdf",
-        document_type="other", summary="second", created_at=t0 + timedelta(minutes=1),
+        opportunity_id=opp.opportunity_id,
+        message_id="m2",
+        filename="b.pdf",
+        document_type="other",
+        summary="second",
+        created_at=t0 + timedelta(minutes=1),
     )
     repo.store_document_analysis(a2)
     repo.store_document_analysis(a1)
-    assert [a.analysis_id for a in repo.list_document_analyses(opp.opportunity_id)] == [a1.analysis_id, a2.analysis_id]
+    assert [a.analysis_id for a in repo.list_document_analyses(opp.opportunity_id)] == [
+        a1.analysis_id,
+        a2.analysis_id,
+    ]
 
 
 # --------------------------------------------------------------------------- opportunity_detail
@@ -374,8 +464,11 @@ def test_opportunity_detail_includes_diligence_documents_and_messages(repo):
     repo.store_diligence_request(req)
 
     analysis = DocumentAnalysis(
-        opportunity_id=opp.opportunity_id, message_id="m1", filename="r.pdf",
-        document_type="inspection_report", summary="s",
+        opportunity_id=opp.opportunity_id,
+        message_id="m1",
+        filename="r.pdf",
+        document_type="inspection_report",
+        summary="s",
     )
     repo.store_document_analysis(analysis)
 

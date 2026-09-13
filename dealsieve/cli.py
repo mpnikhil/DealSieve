@@ -1,6 +1,6 @@
 """`dealsieve` command-line entry point (argparse). Declared in pyproject as `dealsieve = "dealsieve.cli:main"`.
 
-Subcommands: ingest <file.eml|.txt>, seed, reset, serve [--port], telegram-bot, status [deal#].
+Subcommands: ingest <file.eml|.txt>, seed, reset, serve [--port], telegram-bot, status [deal#], retry.
 """
 
 from __future__ import annotations
@@ -153,11 +153,7 @@ def _cmd_followup(args: argparse.Namespace) -> int:
     if args.as_of:
         try:
             parsed = datetime.fromisoformat(args.as_of)
-            as_of = (
-                datetime.combine(parsed.date(), time.max, tzinfo=UTC)
-                if "T" not in args.as_of
-                else parsed
-            )
+            as_of = datetime.combine(parsed.date(), time.max, tzinfo=UTC) if "T" not in args.as_of else parsed
             if as_of.tzinfo is None:
                 as_of = as_of.replace(tzinfo=UTC)
         except ValueError:
@@ -187,6 +183,22 @@ def _cmd_outbox(args: argparse.Namespace) -> int:
         timestamp = draft.sent_at.isoformat() if draft.sent_at else "unknown time"
         recipient = draft.to_email or "unknown recipient"
         print(f"{timestamp}  {draft.kind:<19}  {recipient}  {draft.subject}  [{draft.delivery_ref or '-'}]")
+    return 0
+
+
+def _cmd_retry(args: argparse.Namespace) -> int:
+    """Run one bounded delivery-recovery sweep; failed inbound is report-only."""
+    from dealsieve.diligence import sweep
+    from dealsieve.notifications import get_notifier
+    from dealsieve.outbound import get_outbox
+    from dealsieve.persistence import Repo
+    from dealsieve.policy import load_policy
+
+    repo = Repo(args.db) if args.db else Repo()
+    repo.init_schema()
+    policy = load_policy(args.policy) if args.policy else load_policy()
+    report = sweep(repo, policy, get_outbox(policy), get_notifier(), datetime.now(UTC))
+    print(json.dumps(report.model_dump(mode="json"), default=str, indent=2))
     return 0
 
 
@@ -230,6 +242,14 @@ def build_parser() -> argparse.ArgumentParser:
     p_outbox = sub.add_parser("outbox", help="List broker messages that have been sent.")
     p_outbox.add_argument("--db", default=None, help="Override DEALSIEVE_DB_PATH")
     p_outbox.set_defaults(func=_cmd_outbox)
+
+    p_retry = sub.add_parser(
+        "retry",
+        help="Retry approved outbound drafts and undelivered notifications once.",
+    )
+    p_retry.add_argument("--db", default=None, help="Override DEALSIEVE_DB_PATH")
+    p_retry.add_argument("--policy", default=None, help="Override DEALSIEVE_POLICY_PATH")
+    p_retry.set_defaults(func=_cmd_retry)
 
     return parser
 

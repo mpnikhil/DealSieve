@@ -38,18 +38,14 @@ from dealsieve.persistence import Repo
 from dealsieve.pipeline import process_inbound
 from dealsieve.policy import InvestmentPolicy, load_policy
 from dealsieve.schemas import (
-    Actor,
     Channel,
     DiligenceRequest,
-    EventType,
     InboundMessage,
     Notification,
     Opportunity,
-    OpportunityEvent,
     OpportunityStatus,
     OutboundDraft,
     WatchlistItem,
-    now_utc,
 )
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -220,7 +216,9 @@ def create_app(
     ) -> Response:
         items = list(repo.watchlist())
         if include_dead:
-            dead = [_opportunity_to_watchlist_item(o) for o in repo.list_opportunities(OpportunityStatus.DEAD)]
+            dead = [
+                _opportunity_to_watchlist_item(o) for o in repo.list_opportunities(OpportunityStatus.DEAD)
+            ]
             items = items + dead
         return _json_list(_watchlist_adapter, items)
 
@@ -236,28 +234,6 @@ def create_app(
     @app.get("/api/drafts")
     def list_drafts(status: str | None = Query(default=None), repo: Repo = Depends(get_repo)) -> Response:  # noqa: B008
         return _json_list(_draft_adapter, list(repo.list_drafts(status=status)))
-
-    def _decide_draft(draft_id: str, *, approve: bool, repo: Repo, principal: str) -> OutboundDraft:
-        draft = repo.get_draft(draft_id)
-        if draft is None:
-            raise HTTPException(status_code=404, detail=f"No draft {draft_id!r}")
-        new_status: Literal["approved", "rejected"] = "approved" if approve else "rejected"
-        if not repo.transition_draft(draft_id, "pending", new_status):
-            current = repo.get_draft(draft_id)
-            current_status = current.status if current is not None else "missing"
-            raise HTTPException(status_code=409, detail=f"Draft {draft_id} is {current_status}; expected pending")
-        updated = draft.model_copy(update={"status": new_status, "decided_at": now_utc()})
-        repo.update_draft(updated)
-        event = OpportunityEvent(
-            opportunity_id=draft.opportunity_id,
-            type=EventType.HUMAN_APPROVED_DRAFT if approve else EventType.HUMAN_REJECTED_DRAFT,
-            actor=Actor.HUMAN,
-            summary=f"Human {'approved' if approve else 'rejected'} broker draft {draft.draft_id}"
-            + (f" to {draft.to_email}" if draft.to_email else ""),
-            payload={"draft_id": draft.draft_id, "principal": principal},
-        )
-        repo.append_event(event)
-        return updated
 
     @app.post("/api/drafts/{draft_id}/approve")
     def approve_draft(
@@ -290,21 +266,59 @@ def create_app(
         principal: str = Depends(require_human),  # noqa: B008
         repo: Repo = Depends(get_repo),  # noqa: B008
     ) -> Response:
-        return _json(_decide_draft(draft_id, approve=False, repo=repo, principal=principal))
+        from dealsieve.diligence import reject_draft as reject_draft_action
+
+        try:
+            return _json(reject_draft_action(draft_id, repo=repo, principal=principal))
+        except LookupError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
 
     # ----------------------------------------------------------------------------------- notifications
 
     @app.get("/api/notifications")
     def list_notifications(
-        opportunity_id: str | None = Query(default=None), repo: Repo = Depends(get_repo)  # noqa: B008
+        opportunity_id: str | None = Query(default=None),
+        repo: Repo = Depends(get_repo),  # noqa: B008
     ) -> Response:
         return _json_list(_notification_adapter, list(repo.list_notifications(opportunity_id=opportunity_id)))
+
+    def _acknowledge_notification(notification_id: str, *, principal: str, repo: Repo) -> Notification:
+        from dealsieve.diligence import acknowledge_opportunity
+
+        notification = repo.get_notification(notification_id)
+        if notification is None:
+            raise HTTPException(status_code=404, detail=f"No notification {notification_id!r}")
+        acknowledge_opportunity(
+            notification.opportunity_id,
+            repo=repo,
+            principal=principal,
+        )
+        return notification
+
+    @app.post("/api/notifications/{notification_id}/ignore")
+    def ignore_notification(
+        notification_id: str,
+        principal: str = Depends(require_human),  # noqa: B008
+        repo: Repo = Depends(get_repo),  # noqa: B008
+    ) -> Response:
+        return _json(_acknowledge_notification(notification_id, principal=principal, repo=repo))
+
+    @app.post("/api/notifications/{notification_id}/review")
+    def review_notification(
+        notification_id: str,
+        principal: str = Depends(require_human),  # noqa: B008
+        repo: Repo = Depends(get_repo),  # noqa: B008
+    ) -> Response:
+        return _json(_acknowledge_notification(notification_id, principal=principal, repo=repo))
 
     # ----------------------------------------------------------------------------------- diligence
 
     @app.get("/api/diligence")
     def list_diligence(
-        status: str | None = Query(default=None), repo: Repo = Depends(get_repo)  # noqa: B008
+        status: str | None = Query(default=None),
+        repo: Repo = Depends(get_repo),  # noqa: B008
     ) -> Response:
         return _json_list(_diligence_adapter, list(repo.list_diligence_requests(status=status)))
 
@@ -382,6 +396,7 @@ def create_app(
     @app.post("/api/ingest/email")
     async def ingest_email(
         request: Request,
+        _principal: str = Depends(require_human),  # noqa: B008
         repo: Repo = Depends(get_repo),  # noqa: B008
         policy: InvestmentPolicy = Depends(get_policy),  # noqa: B008
         notifier: Notifier = Depends(get_notifier_dep),  # noqa: B008
@@ -405,6 +420,7 @@ def create_app(
     @app.post("/api/ingest/text")
     async def ingest_text(
         body: IngestTextBody,
+        _principal: str = Depends(require_human),  # noqa: B008
         repo: Repo = Depends(get_repo),  # noqa: B008
         policy: InvestmentPolicy = Depends(get_policy),  # noqa: B008
         notifier: Notifier = Depends(get_notifier_dep),  # noqa: B008

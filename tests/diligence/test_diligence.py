@@ -36,18 +36,21 @@ from dealsieve.diligence import (
     dispatch,
     immediate_capex_from,
     match_answers,
+    reject_draft,
     run_follow_ups,
+    sweep,
 )
 from dealsieve.notifications import RecordingNotifier
 from dealsieve.outbound import FileOutbox, OutboxError, RecordingOutbox
 from dealsieve.persistence import Repo
-from dealsieve.policy import InvestmentPolicy
+from dealsieve.policy import InvestmentPolicy, load_policy
 from dealsieve.schemas import (
     Actor,
     CapexItem,
     DiligenceRequest,
     DocumentAnalysis,
     EventType,
+    InboundMessage,
     Opportunity,
     OpportunityStatus,
     OutboundDraft,
@@ -172,7 +175,7 @@ def test_compose_information_request_no_double_re_and_numbers_questions(policy: 
     draft1 = compose_information_request(
         opp, reqs, policy, in_reply_to="<msg-1@example>", original_subject="Re: Off-market Power Inn"
     )
-    assert draft1.subject == "Re: Off-market Power Inn"
+    assert draft1.subject == "Diligence questions: Power Inn"
     assert not draft1.subject.startswith("Re: Re:")
     assert "Maya" in draft1.body
     assert "1. What is the roof age?" in draft1.body
@@ -184,7 +187,7 @@ def test_compose_information_request_no_double_re_and_numbers_questions(policy: 
     draft2 = compose_information_request(
         opp, reqs, policy, in_reply_to="<msg-1@example>", original_subject="Off-market Power Inn"
     )
-    assert draft2.subject == "Re: Off-market Power Inn"
+    assert draft2.subject == "Diligence questions: Power Inn"
 
 
 def test_compose_follow_up_references_number_and_topics(policy: InvestmentPolicy):
@@ -199,12 +202,13 @@ def test_compose_follow_up_references_number_and_topics(policy: InvestmentPolicy
     ]
     draft = compose_follow_up(opp, reqs, policy, follow_up_number=2, in_reply_to="<msg-1@example>")
     assert draft.kind == "follow_up"
-    assert "Following up #2" in draft.body
+    assert draft.subject.startswith("Diligence follow-up: Power Inn")
+    assert "Follow-up #2 on Phase I" in draft.body
     assert "Phase I report?" in draft.body
     same = compose_follow_up(opp, list(reversed(reqs)), policy, follow_up_number=2, in_reply_to="<other>")
     assert same.draft_id == draft.draft_id
     assert same.subject == draft.subject
-    assert "[DS-" in draft.subject
+    assert draft.subject.startswith("Diligence follow-up: Power Inn [DS-")
 
 
 def test_compose_credit_request_always_requires_approval(policy: InvestmentPolicy):
@@ -222,6 +226,7 @@ def test_compose_credit_request_always_requires_approval(policy: InvestmentPolic
         in_reply_to="<msg-2@example>",
     )
     assert draft.kind == "credit_request"
+    assert draft.subject == "Diligence credit request: Power Inn"
     assert draft.requires_approval is True
     assert "$42,000" in draft.body
     assert "Roof replacement" in draft.body
@@ -298,7 +303,9 @@ def test_dispatch_holds_pending_when_approval_required(repo: Repo, policy: Inves
 def test_dispatch_auto_sends_when_policy_permits(repo: Repo, policy: InvestmentPolicy):
     opp = _make_opp(repo)
     outbox = RecordingOutbox()
-    req = DiligenceRequest(opportunity_id=opp.opportunity_id, topic="Roof age", question="How old is the roof?")
+    req = DiligenceRequest(
+        opportunity_id=opp.opportunity_id, topic="Roof age", question="How old is the roof?"
+    )
     repo.store_diligence_request(req)
 
     auto_policy = policy.model_copy(
@@ -462,9 +469,7 @@ def test_approve_and_send_two_repo_race_delivers_exactly_once(repo: Repo, policy
     assert len(approvals) == 1
 
 
-def test_approve_and_send_failure_restores_approved_for_explicit_retry(
-    repo: Repo, policy: InvestmentPolicy
-):
+def test_approve_and_send_failure_restores_approved_for_explicit_retry(repo: Repo, policy: InvestmentPolicy):
     opp = _make_opp(repo)
     draft = OutboundDraft(
         opportunity_id=opp.opportunity_id,
@@ -484,8 +489,9 @@ def test_approve_and_send_failure_restores_approved_for_explicit_retry(
 
     assert repo.get_draft(draft.draft_id).status == "approved"
     notes = [event for event in repo.list_events(opp.opportunity_id) if event.type == EventType.NOTE]
-    assert len(notes) == 1
-    assert "transport unavailable" in notes[0].payload["error"]
+    delivery_notes = [note for note in notes if "delivery failed" in note.summary]
+    assert len(delivery_notes) == 1
+    assert "transport unavailable" in delivery_notes[0].payload["error"]
 
     retry_outbox = RecordingOutbox()
     sent = approve_and_send(draft.draft_id, repo=repo, policy=policy, outbox=retry_outbox)
@@ -525,9 +531,13 @@ def test_match_answers_matches_families():
 
 def test_apply_answers_resolving_and_partial(repo: Repo):
     opp = _make_opp(repo)
-    r_roof = DiligenceRequest(opportunity_id=opp.opportunity_id, topic="Roof age", question="Age?", status="sent")
+    r_roof = DiligenceRequest(
+        opportunity_id=opp.opportunity_id, topic="Roof age", question="Age?", status="sent"
+    )
     repo.store_diligence_request(r_roof)
-    r_cam = DiligenceRequest(opportunity_id=opp.opportunity_id, topic="CAM audit", question="Audit?", status="sent")
+    r_cam = DiligenceRequest(
+        opportunity_id=opp.opportunity_id, topic="CAM audit", question="Audit?", status="sent"
+    )
     repo.store_diligence_request(r_cam)
 
     analysis = DocumentAnalysis(
@@ -542,7 +552,10 @@ def test_apply_answers_resolving_and_partial(repo: Repo):
 
     matches = [
         (r_roof, RequestAnswer(request_topic="Roof age", answer="Installed 2001", resolves=True)),
-        (r_cam, RequestAnswer(request_topic="CAM audit", answer="Still reviewing 2024 records", resolves=False)),
+        (
+            r_cam,
+            RequestAnswer(request_topic="CAM audit", answer="Still reviewing 2024 records", resolves=False),
+        ),
     ]
 
     updated = apply_answers(matches, analysis, repo=repo, evidence_ids_by_topic={"Roof age": ["ev-1"]})
@@ -564,9 +577,27 @@ def test_apply_answers_resolving_and_partial(repo: Repo):
 
 def test_immediate_capex_from_filters_by_urgency(policy: InvestmentPolicy):
     items = [
-        CapexItem(item="Roof replacement", low=Decimal("85000"), high=Decimal("95000"), urgency="immediate", source_document="report.pdf"),
-        CapexItem(item="HVAC replacement", low=Decimal("28000"), high=Decimal("36000"), urgency="deferred", source_document="report.pdf"),
-        CapexItem(item="Seal coat", low=Decimal("6000"), high=Decimal("8000"), urgency="deferred", source_document="report.pdf"),
+        CapexItem(
+            item="Roof replacement",
+            low=Decimal("85000"),
+            high=Decimal("95000"),
+            urgency="immediate",
+            source_document="report.pdf",
+        ),
+        CapexItem(
+            item="HVAC replacement",
+            low=Decimal("28000"),
+            high=Decimal("36000"),
+            urgency="deferred",
+            source_document="report.pdf",
+        ),
+        CapexItem(
+            item="Seal coat",
+            low=Decimal("6000"),
+            high=Decimal("8000"),
+            urgency="deferred",
+            source_document="report.pdf",
+        ),
     ]
     total = immediate_capex_from(items, policy)
     assert total == Decimal("90000")
@@ -614,7 +645,8 @@ def test_run_follow_ups_cadence_batching_stall_and_idempotence(repo: Repo, polic
     report2 = run_follow_ups(repo=repo, policy=policy, outbox=outbox, notifier=notifier, as_of=as_of_due)
     assert report2.follow_ups_sent == 1
     assert len(outbox.sent) == 1
-    assert "Following up #1" in outbox.sent[0].body
+    assert "Follow-up #1 on Topic 1" in outbox.sent[0].body
+    assert "Follow-up #1 on Topic 2" in outbox.sent[0].body
     assert "Q1?" in outbox.sent[0].body and "Q2?" in outbox.sent[0].body
 
     updated_r1 = repo.get_diligence_request(r1.request_id)
@@ -628,10 +660,16 @@ def test_run_follow_ups_cadence_batching_stall_and_idempotence(repo: Repo, polic
 
     # 4. Advance past max_follow_ups -> marks stalled and alerts human
     stalled_due = as_of_due + timedelta(days=10)
-    repo.update_diligence_request(updated_r1.model_copy(update={"follow_up_count": 2, "due_at": stalled_due - timedelta(days=1)}))
-    repo.update_diligence_request(r2.model_copy(update={"follow_up_count": 2, "due_at": stalled_due - timedelta(days=1)}))
+    repo.update_diligence_request(
+        updated_r1.model_copy(update={"follow_up_count": 2, "due_at": stalled_due - timedelta(days=1)})
+    )
+    repo.update_diligence_request(
+        r2.model_copy(update={"follow_up_count": 2, "due_at": stalled_due - timedelta(days=1)})
+    )
 
-    report_stall = run_follow_ups(repo=repo, policy=policy, outbox=outbox, notifier=notifier, as_of=stalled_due)
+    report_stall = run_follow_ups(
+        repo=repo, policy=policy, outbox=outbox, notifier=notifier, as_of=stalled_due
+    )
     assert report_stall.stalled == 2
     assert repo.get_diligence_request(r1.request_id).status == "stalled"
     assert repo.get_diligence_request(r2.request_id).status == "stalled"
@@ -774,6 +812,297 @@ def test_run_follow_ups_transport_failure_rolls_back_reservation(repo: Repo, pol
     notes = [event for event in repo.list_events(opp.opportunity_id) if event.type == EventType.NOTE]
     assert len(notes) == 1
     assert "failed" in notes[0].payload["error"]
+
+
+def test_reject_withdraws_draft_requests_and_acknowledges(repo: Repo, policy: InvestmentPolicy):
+    opp = _make_opp(repo)
+    repo.save_opportunity(opp.model_copy(update={"human_attention_required": True}))
+    request = DiligenceRequest(
+        opportunity_id=opp.opportunity_id,
+        topic="Roof age",
+        question="How old is the roof?",
+    )
+    repo.store_diligence_request(request)
+    draft = compose_information_request(
+        opp,
+        [request],
+        policy,
+        in_reply_to="<message@example>",
+        original_subject="Off-market: $1.55M",
+    )
+    pending = dispatch(draft, repo=repo, policy=policy, outbox=RecordingOutbox())
+
+    rejected = reject_draft(
+        pending.draft_id,
+        repo=repo,
+        principal="human:test",
+        reason="already answered",
+    )
+
+    assert rejected.status == "rejected"
+    assert repo.get_diligence_request(request.request_id).status == "withdrawn"
+    assert repo.open_diligence_count() == 0
+    assert repo.get_opportunity(opp.opportunity_id).human_attention_required is False
+    events = repo.list_events(opp.opportunity_id)
+    assert any(event.type == EventType.HUMAN_REJECTED_DRAFT for event in events)
+    assert any(event.summary == "Diligence request withdrawn: Roof age" for event in events)
+    assert any(event.summary == "Acknowledged by human:test" for event in events)
+
+
+def test_subject_is_property_based_screened_and_demo_policy_behavior(repo: Repo, policy: InvestmentPolicy):
+    opp = _make_opp(repo, "8330 Power Inn Road, Sacramento, CA")
+    request = DiligenceRequest(
+        opportunity_id=opp.opportunity_id,
+        topic="Roof age",
+        question="What is the roof age?",
+    )
+    repo.store_diligence_request(request)
+    pending = compose_information_request(
+        opp,
+        [request],
+        policy,
+        in_reply_to="<om@example>",
+        original_subject="Off-market: $1.55M / 8.13% cap",
+    )
+    assert pending.subject == "Diligence questions: 8330 Power Inn Road, Sacramento, CA"
+    assert dispatch(pending, repo=repo, policy=policy, outbox=RecordingOutbox()).status == "pending"
+
+    other = _make_opp(repo, "8331 Power Inn Road, Sacramento, CA")
+    auto_request = request.model_copy(
+        update={"request_id": "dil_demo_auto", "opportunity_id": other.opportunity_id}
+    )
+    repo.store_diligence_request(auto_request)
+    auto_policy = load_policy("fixtures/policies/autosend_policy.yaml")
+    auto = compose_information_request(
+        other,
+        [auto_request],
+        auto_policy,
+        in_reply_to="<om@example>",
+        original_subject="Off-market: $1.55M / 8.13% cap",
+    )
+    outbox = RecordingOutbox()
+    assert dispatch(auto, repo=repo, policy=auto_policy, outbox=outbox).status == "sent"
+    assert len(outbox.sent) == 1
+
+    unsafe_subject = OutboundDraft(
+        opportunity_id=other.opportunity_id,
+        kind="information_request",
+        to_email="broker@example.com",
+        subject="Please reduce the price",
+        body="What is the roof age?",
+        requires_approval=False,
+    )
+    assert dispatch(unsafe_subject, repo=repo, policy=auto_policy, outbox=outbox).status == "pending"
+    assert len(outbox.sent) == 1
+
+
+def test_held_follow_up_is_not_recomposed_and_approval_advances_once(repo: Repo, policy: InvestmentPolicy):
+    opp = _make_opp(repo)
+    held_policy = policy.model_copy(
+        update={"outreach": policy.outreach.model_copy(update={"auto_follow_up_approved_threads": False})}
+    )
+    due = datetime(2026, 9, 10, tzinfo=UTC)
+    request = DiligenceRequest(
+        opportunity_id=opp.opportunity_id,
+        topic="Phase I",
+        question="Please send the Phase I.",
+        status="sent",
+        sent_at=due - timedelta(days=3),
+        due_at=due,
+    )
+    repo.store_diligence_request(request)
+    outbox = RecordingOutbox()
+    notifier = RecordingNotifier()
+
+    run_follow_ups(
+        repo=repo,
+        policy=held_policy,
+        outbox=outbox,
+        notifier=notifier,
+        as_of=due,
+    )
+    drafts = repo.list_drafts(status="pending", opportunity_id=opp.opportunity_id)
+    assert len(drafts) == 1 and drafts[0].kind == "follow_up"
+    event_count = len(repo.list_events(opp.opportunity_id))
+    for tick in (due + timedelta(days=1), due + timedelta(days=2)):
+        run_follow_ups(
+            repo=repo,
+            policy=held_policy,
+            outbox=outbox,
+            notifier=notifier,
+            as_of=tick,
+        )
+    assert repo.list_drafts(status="pending", opportunity_id=opp.opportunity_id) == drafts
+    assert len(repo.list_events(opp.opportunity_id)) == event_count
+    assert repo.get_diligence_request(request.request_id).follow_up_count == 0
+
+    sent = approve_and_send(
+        drafts[0].draft_id,
+        repo=repo,
+        policy=held_policy,
+        outbox=outbox,
+        principal="human:test",
+    )
+    assert sent.status == "sent"
+    assert len(outbox.sent) == 1
+    assert repo.get_diligence_request(request.request_id).follow_up_count == 1
+    assert (
+        approve_and_send(
+            drafts[0].draft_id,
+            repo=repo,
+            policy=held_policy,
+            outbox=outbox,
+            principal="human:test",
+        ).status
+        == "sent"
+    )
+    assert len(outbox.sent) == 1
+
+
+def test_follow_up_numbers_are_per_request_and_id_uses_full_set_and_date(
+    policy: InvestmentPolicy,
+):
+    opp = Opportunity(property_id="p1", display_name="Power Inn", broker_email="b@example.com")
+    older = DiligenceRequest(
+        request_id="dil_a",
+        opportunity_id=opp.opportunity_id,
+        topic="Roof",
+        question="Roof?",
+        status="sent",
+        follow_up_count=2,
+    )
+    newer = DiligenceRequest(
+        request_id="dil_b",
+        opportunity_id=opp.opportunity_id,
+        topic="Phase I",
+        question="Phase I?",
+        status="sent",
+        follow_up_count=1,
+    )
+    tick = datetime(2026, 9, 13, tzinfo=UTC)
+    draft = compose_follow_up(
+        opp,
+        [newer, older],
+        policy,
+        follow_up_number=1,
+        in_reply_to="<m>",
+        as_of=tick,
+    )
+    assert "Follow-up #2 on Roof" in draft.body
+    assert "Follow-up #1 on Phase I" in draft.body
+    reversed_draft = compose_follow_up(
+        opp,
+        [older, newer],
+        policy,
+        follow_up_number=1,
+        in_reply_to="<other>",
+        as_of=tick,
+    )
+    assert reversed_draft.draft_id == draft.draft_id
+    tomorrow = compose_follow_up(
+        opp,
+        [older, newer],
+        policy,
+        follow_up_number=1,
+        in_reply_to="<other>",
+        as_of=tick + timedelta(days=1),
+    )
+    assert tomorrow.draft_id != draft.draft_id
+
+
+def test_sweep_bounds_draft_failures_and_emits_one_escalation(repo: Repo, policy: InvestmentPolicy):
+    opp = _make_opp(repo)
+    draft = OutboundDraft(
+        opportunity_id=opp.opportunity_id,
+        to_email="broker@example.com",
+        subject="Diligence questions: Test Property",
+        body="What is the roof age?",
+    )
+    repo.store_draft(draft)
+
+    class FailingOutbox:
+        def send(self, message: OutboundDraft) -> str:
+            raise OutboxError(f"offline {message.draft_id}")
+
+    with pytest.raises(OutboxError):
+        approve_and_send(draft.draft_id, repo=repo, policy=policy, outbox=FailingOutbox())
+    notifier = RecordingNotifier()
+    sweep(repo, policy, FailingOutbox(), notifier, datetime(2026, 9, 13, tzinfo=UTC))
+    sweep(repo, policy, FailingOutbox(), notifier, datetime(2026, 9, 14, tzinfo=UTC))
+    sweep(repo, policy, FailingOutbox(), notifier, datetime(2026, 9, 15, tzinfo=UTC))
+
+    assert repo.draft_delivery_failures(draft.draft_id) == 3
+    alerts = [n for n in repo.list_notifications() if n.kind == "status_update"]
+    assert len(alerts) == 1
+    assert alerts[0].title == "Outbound mail is not going out"
+    assert alerts[0].delivered is True
+    assert len([n for n in notifier.sent if n.title == alerts[0].title]) == 1
+
+
+def test_stalled_notification_failure_remains_undelivered_and_sweep_retries(
+    repo: Repo, policy: InvestmentPolicy
+):
+    opp = _make_opp(repo)
+    due = datetime(2026, 9, 10, tzinfo=UTC)
+    request = DiligenceRequest(
+        opportunity_id=opp.opportunity_id,
+        topic="CAM",
+        question="CAM?",
+        status="sent",
+        due_at=due,
+        follow_up_count=policy.outreach.max_follow_ups,
+    )
+    repo.store_diligence_request(request)
+
+    class FailOnceNotifier(RecordingNotifier):
+        def __init__(self) -> None:
+            super().__init__()
+            self.failed = False
+
+        def send(self, notification):
+            if not self.failed:
+                self.failed = True
+                raise RuntimeError("telegram down")
+            return super().send(notification)
+
+    notifier = FailOnceNotifier()
+    run_follow_ups(
+        repo=repo,
+        policy=policy,
+        outbox=RecordingOutbox(),
+        notifier=notifier,
+        as_of=due,
+    )
+    stored = repo.list_notifications()[0]
+    assert stored.kind == "diligence_stalled"
+    assert stored.delivered is False and stored.delivery_ref is None
+
+    report = sweep(
+        repo,
+        policy,
+        RecordingOutbox(),
+        notifier,
+        due + timedelta(days=1),
+    )
+    assert report.notifications_delivered == [stored.notification_id]
+    assert repo.get_notification(stored.notification_id).delivered is True
+
+
+def test_sweep_reports_failed_inbound_without_reclaiming(repo: Repo, policy: InvestmentPolicy):
+    message = InboundMessage(message_id="failed-message", channel="manual", body_text="bad")
+    assert repo.claim_message(message) == "claimed"
+    repo.mark_message_failed(message.message_id, "model unavailable")
+
+    report = sweep(
+        repo,
+        policy,
+        RecordingOutbox(),
+        RecordingNotifier(),
+        datetime(2026, 9, 13, tzinfo=UTC),
+    )
+
+    assert report.failed_inbound_messages == [{"message_id": "failed-message", "error": "model unavailable"}]
+    assert repo.message_status(message.message_id) == "failed"
 
 
 # --------------------------------------------------------------------------- FileOutbox

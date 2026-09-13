@@ -18,6 +18,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from dealsieve.api.app import create_app
+from dealsieve.cli import build_parser
 from dealsieve.notifications import RecordingNotifier
 from dealsieve.outbound import RecordingOutbox
 from dealsieve.schemas import (
@@ -92,6 +93,11 @@ def test_health(client: TestClient, policy) -> None:
     assert isinstance(body["backend"], str) and body["backend"]
 
 
+def test_cli_exposes_retry_command() -> None:
+    args = build_parser().parse_args(["retry", "--db", "/tmp/retry-test.db"])
+    assert args.command == "retry"
+
+
 def test_stats_empty_repo(client: TestClient) -> None:
     r = client.get("/api/stats")
     assert r.status_code == 200
@@ -128,7 +134,9 @@ def test_policy_decimals_serialize_as_numbers(client: TestClient, policy) -> Non
     assert isinstance(body["capital"]["acquisition_equity"], float)
     assert body["capital"]["acquisition_equity"] == float(policy.capital.acquisition_equity)
     assert isinstance(body["underwriting"]["min_normalized_cap_rate"], float)
-    assert body["underwriting"]["min_normalized_cap_rate"] == float(policy.underwriting.min_normalized_cap_rate)
+    assert body["underwriting"]["min_normalized_cap_rate"] == float(
+        policy.underwriting.min_normalized_cap_rate
+    )
     assert body["property"]["tenant_count_min"] == policy.property.tenant_count_min
 
 
@@ -183,6 +191,7 @@ def test_opportunity_detail_404_for_unknown_id(client: TestClient) -> None:
 
 def test_draft_approve_records_event_and_sends(client: TestClient, repo) -> None:
     opp = _make_opportunity(repo, status=OpportunityStatus.REVIEW)
+    repo.save_opportunity(opp.model_copy(update={"human_attention_required": True}))
     draft = OutboundDraft(
         opportunity_id=opp.opportunity_id,
         to_email="broker@example.com",
@@ -212,11 +221,13 @@ def test_draft_approve_records_event_and_sends(client: TestClient, repo) -> None
     # With Phase 2 diligence, approval dispatches via outbox and records BROKER_MESSAGE_SENT.
     sent_events = [e for e in events if e.type == EventType.BROKER_MESSAGE_SENT]
     assert len(sent_events) == 1
-
+    assert repo.get_opportunity(opp.opportunity_id).human_attention_required is False
+    assert any(event.summary == "Acknowledged by human:local" for event in events)
 
 
 def test_draft_reject_records_event(client: TestClient, repo) -> None:
     opp = _make_opportunity(repo, status=OpportunityStatus.REVIEW)
+    repo.save_opportunity(opp.model_copy(update={"human_attention_required": True}))
     draft = OutboundDraft(
         opportunity_id=opp.opportunity_id,
         to_email="broker@example.com",
@@ -234,6 +245,29 @@ def test_draft_reject_records_event(client: TestClient, repo) -> None:
     assert len(rejected_events) == 1
     assert rejected_events[0].actor == Actor.HUMAN
     assert rejected_events[0].payload["principal"] == "human:local"
+    assert repo.get_opportunity(opp.opportunity_id).human_attention_required is False
+
+
+@pytest.mark.parametrize("action", ["ignore", "review"])
+def test_notification_action_acknowledges_and_clears_attention(client: TestClient, repo, action: str) -> None:
+    opp = _make_opportunity(repo, status=OpportunityStatus.REVIEW)
+    repo.save_opportunity(opp.model_copy(update={"human_attention_required": True}))
+    notification = Notification(
+        opportunity_id=opp.opportunity_id,
+        kind="threshold_crossed",
+        channel=Channel.MANUAL,
+        title="Review",
+        body="Deal crossed",
+    )
+    repo.store_notification(notification)
+
+    response = client.post(f"/api/notifications/{notification.notification_id}/{action}")
+
+    assert response.status_code == 200
+    assert repo.get_opportunity(opp.opportunity_id).human_attention_required is False
+    assert any(
+        event.summary == "Acknowledged by human:local" for event in repo.list_events(opp.opportunity_id)
+    )
 
 
 def test_draft_approve_404_for_unknown_draft(client: TestClient) -> None:
@@ -246,6 +280,8 @@ def test_draft_approve_404_for_unknown_draft(client: TestClient) -> None:
     [
         ("/api/drafts/anything/approve", None),
         ("/api/drafts/anything/reject", None),
+        ("/api/notifications/anything/ignore", None),
+        ("/api/notifications/anything/review", None),
         ("/api/diligence/tick", {"as_of": None}),
     ],
 )
@@ -416,6 +452,21 @@ def test_ingest_email_multipart_requires_file_field(client: TestClient) -> None:
     assert r.status_code == 400
 
 
+def test_ingest_routes_require_human_for_non_loopback(repo, policy, notifier) -> None:
+    app = create_app(repo=repo, policy=policy, notifier=notifier, outbox=RecordingOutbox())
+    external = TestClient(app, client=("203.0.113.8", 50000))
+
+    assert external.post("/api/ingest/text", json={"text": "hello"}).status_code == 403
+    assert (
+        external.post(
+            "/api/ingest/email",
+            content=b"From: a@example.com\n\nhello",
+            headers={"Content-Type": "message/rfc822"},
+        ).status_code
+        == 403
+    )
+
+
 # --------------------------------------------------------------------------------------- ingestion: end to end
 
 
@@ -476,7 +527,11 @@ def test_ingest_text_end_to_end(client: TestClient, repo, scripted_env) -> None:
     try:
         response = client.post(
             "/api/ingest/text",
-            json={"text": "New off-market listing at 100 Test Avenue.", "sender": "broker@example.com", "channel": "manual"},
+            json={
+                "text": "New off-market listing at 100 Test Avenue.",
+                "sender": "broker@example.com",
+                "channel": "manual",
+            },
         )
     except Exception as exc:  # pipeline/agents/persistence still landing concurrently (W1/W2/W3)
         _skip_if_pipeline_unavailable(exc)

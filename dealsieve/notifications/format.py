@@ -41,6 +41,17 @@ _PENDING_REQUEST_ACTIONS: list[NotificationAction] = [
 ]
 
 
+def _with_draft_target(notification: Notification, draft: OutboundDraft | None) -> Notification:
+    """Attach transport metadata without changing the shared notification/action contract.
+
+    Persistence preserves this private value so a resumed Telegram notification still targets the
+    exact draft rather than whichever pending draft happens to sort first.
+    """
+    if draft is not None:
+        object.__setattr__(notification, "_telegram_draft_id", draft.draft_id)
+    return notification
+
+
 def _money(value: Decimal) -> str:
     return f"${value:,.0f}"
 
@@ -132,7 +143,11 @@ def format_threshold_alert(
         if overflow:
             lines.append(f"- +{len(overflow)} more in the dashboard")
 
-    if pending_request is not None and pending_request.kind == "information_request" and pending_request.status == "pending":
+    if (
+        pending_request is not None
+        and pending_request.kind == "information_request"
+        and pending_request.status == "pending"
+    ):
         lines.append("")
         lines.append(
             "Awaiting your approval: information request to the broker "
@@ -141,7 +156,7 @@ def format_threshold_alert(
 
     body = "\n".join(lines)
 
-    return Notification(
+    notification = Notification(
         opportunity_id=opportunity.opportunity_id,
         kind="threshold_crossed",
         channel=channel,
@@ -149,6 +164,7 @@ def format_threshold_alert(
         body=body,
         actions=list(_PENDING_REQUEST_ACTIONS if pending_request is not None else _ACTIONS),
     )
+    return _with_draft_target(notification, pending_request)
 
 
 def _finding_lines(analysis: DocumentAnalysis, limit: int = 3, width: int = 96) -> list[str]:
@@ -180,7 +196,9 @@ def format_fell_below_alert(
     if analysis is not None:
         bullets = _finding_lines(analysis)
         if bullets:
-            lines.extend(["", f"Diligence established ({analysis.images_reviewed} photos reviewed):", *bullets])
+            lines.extend(
+                ["", f"Diligence established ({analysis.images_reviewed} photos reviewed):", *bullets]
+            )
         immediate = sum(
             (item.midpoint for item in analysis.capex_items if item.urgency in {"immediate", "near_term"}),
             Decimal("0"),
@@ -189,9 +207,7 @@ def format_fell_below_alert(
             lines.append(f"Immediate capex added: {_money(immediate)}")
 
     old_basis = (
-        previous_run.financing.all_in_basis or previous_run.financing.purchase_price
-        if previous_run
-        else None
+        previous_run.financing.all_in_basis or previous_run.financing.purchase_price if previous_run else None
     )
     new_basis = new_run.financing.all_in_basis or new_run.financing.purchase_price
     cap_gate = _find_gate(new_run, "min_normalized_cap_rate")
@@ -249,7 +265,7 @@ def format_fell_below_alert(
         amount = amount_match.group(0) if amount_match else "the required"
         lines.extend(["", f"Drafted for your approval: request a {amount} credit."])
 
-    return Notification(
+    notification = Notification(
         opportunity_id=opportunity.opportunity_id,
         kind="fell_below_threshold",
         channel=channel,
@@ -261,6 +277,7 @@ def format_fell_below_alert(
             NotificationAction(label="Reject", action="reject"),
         ],
     )
+    return _with_draft_target(notification, credit_draft)
 
 
 def format_stalled_alert(

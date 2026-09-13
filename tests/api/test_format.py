@@ -20,6 +20,7 @@ from dealsieve.schemas import (
     NormalizedEconomics,
     Opportunity,
     OpportunityStatus,
+    OutboundDraft,
     SkepticConcern,
     SkepticReport,
     UnderwritingResult,
@@ -143,7 +144,13 @@ def _financing(*, price: Decimal, dscr: Decimal) -> FinancingResult:
 
 
 def _run(
-    *, price: Decimal, cap_rate: Decimal, dscr: Decimal, status: OpportunityStatus, cap_passed: bool, dscr_passed: bool
+    *,
+    price: Decimal,
+    cap_rate: Decimal,
+    dscr: Decimal,
+    status: OpportunityStatus,
+    cap_passed: bool,
+    dscr_passed: bool,
 ) -> UnderwritingResult:
     working_values = WorkingValues(
         asking_price=price,
@@ -161,7 +168,9 @@ def _run(
         current_price=price,
         max_viable_price=Decimal("1300000") if status != OpportunityStatus.REVIEW else None,
         distance_pct=Decimal("0") if status == OpportunityStatus.REVIEW else Decimal("0.16"),
-        binding_constraints=[] if status == OpportunityStatus.REVIEW else ["min_normalized_cap_rate", "min_base_dscr"],
+        binding_constraints=[]
+        if status == OpportunityStatus.REVIEW
+        else ["min_normalized_cap_rate", "min_base_dscr"],
         structural_failures=[],
     )
     return UnderwritingResult(
@@ -272,6 +281,41 @@ def test_format_threshold_alert_matches_contracts_example() -> None:
     assert full_text == expected_full
 
 
+def test_threshold_alert_carries_exact_pending_draft_target() -> None:
+    opportunity = _opportunity()
+    run = _run(
+        price=Decimal("1250000"),
+        cap_rate=Decimal("0.0827"),
+        dscr=Decimal("1.43"),
+        status=OpportunityStatus.REVIEW,
+        cap_passed=True,
+        dscr_passed=True,
+    )
+    draft = OutboundDraft(
+        draft_id="drf_questions",
+        opportunity_id=opportunity.opportunity_id,
+        to_email="broker@example.com",
+        subject="Diligence questions: Power Inn",
+        body="Questions",
+        questions=["Roof age?"],
+    )
+
+    notification = format_threshold_alert(
+        opportunity,
+        None,
+        run,
+        None,
+        pending_request=draft,
+    )
+
+    assert notification.__dict__["_telegram_draft_id"] == "drf_questions"
+    assert [action.action for action in notification.actions] == [
+        "review",
+        "approve",
+        "ignore",
+    ]
+
+
 def test_format_threshold_alert_omits_previously_failed_line_with_prior_structural_failure() -> None:
     opportunity = _opportunity()
     previous_run = _run(
@@ -283,7 +327,11 @@ def test_format_threshold_alert_omits_previously_failed_line_with_prior_structur
         dscr_passed=False,
     )
     previous_run = previous_run.model_copy(
-        update={"viability": previous_run.viability.model_copy(update={"structural_failures": ["largest_tenant_pct_max"]})}
+        update={
+            "viability": previous_run.viability.model_copy(
+                update={"structural_failures": ["largest_tenant_pct_max"]}
+            )
+        }
     )
     new_run = _run(
         price=Decimal("1250000"),
@@ -349,13 +397,21 @@ def test_format_threshold_alert_caps_unresolved_list_at_four() -> None:
                 why_it_matters="Material to the decision.",
                 evidence_status="missing",
             )
-            for topic in ["roof age", "Phase I environmental", "CAM reconciliation", "lease rollover", "financing"]
+            for topic in [
+                "roof age",
+                "Phase I environmental",
+                "CAM reconciliation",
+                "lease rollover",
+                "financing",
+            ]
         ],
     )
 
     notification = format_threshold_alert(opportunity, previous_run, new_run, skeptic)
 
-    unresolved_lines = notification.body.splitlines()[notification.body.splitlines().index("Still unresolved:") + 1 :]
+    unresolved_lines = notification.body.splitlines()[
+        notification.body.splitlines().index("Still unresolved:") + 1 :
+    ]
     assert unresolved_lines == [
         "- roof age",
         "- Phase I environmental",

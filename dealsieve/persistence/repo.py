@@ -20,7 +20,7 @@ import time
 from collections.abc import Callable
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from dealsieve.persistence.db import connect
 from dealsieve.persistence.db import init_schema as _init_schema
@@ -48,6 +48,10 @@ from dealsieve.schemas import (
 
 DEFAULT_DB_PATH = Path(os.environ.get("DEALSIEVE_DB_PATH", "data/dealsieve.db"))
 
+MessageClaimResult = Literal["claimed", "completed", "in_flight"]
+MessageProcessingStatus = Literal["received", "processing", "completed", "failed"]
+
+
 # R4: a "processing" row this old with no update is presumed abandoned (crashed worker, killed
 # process) and safe to re-claim.
 _STALE_PROCESSING_AFTER = timedelta(minutes=30)
@@ -73,6 +77,7 @@ def _is_locked_error(exc: sqlite3.OperationalError) -> bool:
     message = str(exc).lower()
     return "locked" in message or "busy" in message
 
+
 _STATUS_RANK = {
     OpportunityStatus.REVIEW: 0,
     OpportunityStatus.NEAR: 1,
@@ -88,11 +93,23 @@ _CONDITION_CHANGE_TYPES = {
 
 
 def _dump(model: DSModel) -> str:
-    return json.dumps(model.model_dump(mode="python"), default=str)
+    data = model.model_dump(mode="python")
+    # NotificationAction has no target-id field in the shared schema. Alert formatters attach this
+    # transport-only value to the Notification itself; preserve it in the JSON row so a notification
+    # resumed after process restart still produces the correct draft-specific Telegram callback.
+    telegram_draft_id = getattr(model, "_telegram_draft_id", None)
+    if telegram_draft_id is not None:
+        data["_telegram_draft_id"] = telegram_draft_id
+    return json.dumps(data, default=str)
 
 
 def _load[M: DSModel](cls: type[M], text: str) -> M:
-    return cls.model_validate(json.loads(text))
+    data = json.loads(text)
+    telegram_draft_id = data.pop("_telegram_draft_id", None)
+    model = cls.model_validate(data)
+    if telegram_draft_id is not None:
+        object.__setattr__(model, "_telegram_draft_id", telegram_draft_id)
+    return model
 
 
 def _locked[F: Callable[..., Any]](method: F) -> F:
@@ -115,7 +132,13 @@ def _locked[F: Callable[..., Any]](method: F) -> F:
 
 
 class Repo:
-    """All methods are synchronous. One Repo per process is fine; sqlite3 with WAL."""
+    """Synchronous SQLite repository with WAL enabled.
+
+    Stored diligence-request status is authoritative except for ``overdue``: that value is a
+    read-model projection only. ``list_diligence_requests`` and ``opportunity_detail`` return a
+    copy with status ``overdue`` when the stored row is ``sent`` and ``due_at < now_utc()``; the
+    database row remains ``sent`` so cadence transitions never depend on a clock-driven write.
+    """
 
     def __init__(self, db_path: str | os.PathLike[str] | None = None) -> None:
         self.db_path = Path(db_path) if db_path else DEFAULT_DB_PATH
@@ -204,21 +227,24 @@ class Repo:
         return _load(InboundMessage, row["json"]) if row else None
 
     @_locked
-    def claim_message(self, message: InboundMessage) -> bool:
-        """R4: atomically claim ``message`` for processing, storing it on first sight.
+    def claim_message(self, message: InboundMessage) -> MessageClaimResult:
+        """Atomically claim ``message`` and return an exact tri-state result (F14).
 
-        Returns True when the caller should (re)process the message:
+        The return type is ``Literal["claimed", "completed", "in_flight"]``:
+
+        ``"claimed"`` means the caller owns processing because:
           - it has never been seen before (row inserted with status "processing"), or
           - it was stored through the legacy path and is still "received", or
           - the last attempt failed (status "failed" -> re-claimed as "processing"), or
           - the last attempt is "processing" but stale (no update in >30 minutes: an abandoned
             worker) -> re-claimed as "processing".
-        Returns False when the message is already "completed", or is "processing" and NOT stale
-        (someone else is actively handling it right now) -- in neither case does this call change
-        the stored row.
+        ``"completed"`` means the immutable result already exists and the caller must not run it.
+        ``"in_flight"`` means a non-stale processing lease belongs to another worker. Neither
+        non-claim result changes the stored row. Callers that only understand booleans may use
+        :meth:`claim_message_bool`, where only ``"claimed"`` maps to ``True``.
         """
 
-        def _txn() -> bool:
+        def _txn() -> MessageClaimResult:
             conn = self._conn
             row = conn.execute(
                 "SELECT status, updated_at FROM inbound_messages WHERE message_id = ?",
@@ -245,11 +271,11 @@ class Repo:
                         _dump(message),
                     ),
                 )
-                return True
+                return "claimed"
 
             status = row["status"]
             if status == "completed":
-                return False
+                return "completed"
 
             # `store_inbound_message` is still used by the record-claims path and creates a
             # received row.  Such a row has been persisted, but has never been processed, so it
@@ -266,7 +292,7 @@ class Repo:
                 reclaim = stale
 
             if not reclaim:
-                return False
+                return "in_flight"
 
             conn.execute(
                 """
@@ -276,9 +302,29 @@ class Repo:
                 """,
                 (now_iso, _dump(message), message.message_id),
             )
-            return True
+            return "claimed"
 
         return self._run_immediate(_txn)
+
+    def claim_message_bool(self, message: InboundMessage) -> bool:
+        """Compatibility shim: return ``True`` only when :meth:`claim_message` returns ``claimed``."""
+        return self.claim_message(message) == "claimed"
+
+    @_locked
+    def message_status(self, message_id: str) -> MessageProcessingStatus | None:
+        """Return the persisted processing status for ``message_id``, or ``None`` if unseen."""
+        row = self._conn.execute(
+            "SELECT status FROM inbound_messages WHERE message_id = ?", (message_id,)
+        ).fetchone()
+        return row["status"] if row is not None else None
+
+    @_locked
+    def list_failed_messages(self) -> list[tuple[InboundMessage, str | None]]:
+        """Return failed inbound messages and their last error for operator-facing retry reports."""
+        rows = self._conn.execute(
+            "SELECT json, error FROM inbound_messages WHERE status = 'failed' ORDER BY updated_at, rowid"
+        ).fetchall()
+        return [(_load(InboundMessage, row["json"]), row["error"]) for row in rows]
 
     @_locked
     def mark_message_completed(self, message_id: str) -> None:
@@ -426,9 +472,7 @@ class Repo:
     @_locked
     def list_opportunities(self, status: OpportunityStatus | None = None) -> list[Opportunity]:
         if status is None:
-            rows = self._conn.execute(
-                "SELECT json FROM opportunities ORDER BY deal_number"
-            ).fetchall()
+            rows = self._conn.execute("SELECT json FROM opportunities ORDER BY deal_number").fetchall()
         else:
             rows = self._conn.execute(
                 "SELECT json FROM opportunities WHERE status = ? ORDER BY deal_number",
@@ -539,10 +583,64 @@ class Repo:
         self._conn.commit()
 
     @_locked
+    def record_underwriting(self, run: UnderwritingResult, event: OpportunityEvent) -> OpportunityEvent:
+        """Insert ``run`` and its ``UNDERWRITING_COMPLETED`` event in one transaction (F17).
+
+        ``event`` must belong to the same opportunity and have type ``UNDERWRITING_COMPLETED``.
+        The returned event has the next gap-free per-opportunity sequence number. Both inserts
+        commit together under one ``BEGIN IMMEDIATE``; either conflict rolls both back.
+        """
+        if event.opportunity_id != run.opportunity_id:
+            raise ValueError("run and event must belong to the same opportunity")
+        if event.type != EventType.UNDERWRITING_COMPLETED:
+            raise ValueError("record_underwriting requires an UNDERWRITING_COMPLETED event")
+
+        def _txn() -> OpportunityEvent:
+            conn = self._conn
+            conn.execute(
+                """
+                INSERT INTO underwriting_runs
+                    (run_id, opportunity_id, policy_version, created_at, status, json)
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    run.run_id,
+                    run.opportunity_id,
+                    run.policy_version,
+                    run.created_at.isoformat(),
+                    str(run.status),
+                    _dump(run),
+                ),
+            )
+            row = conn.execute(
+                "SELECT MAX(seq) AS m FROM opportunity_events WHERE opportunity_id = ?",
+                (event.opportunity_id,),
+            ).fetchone()
+            next_seq = (row["m"] + 1) if row and row["m"] is not None else 1
+            final = event.model_copy(update={"seq": next_seq})
+            conn.execute(
+                """
+                INSERT INTO opportunity_events
+                    (event_id, opportunity_id, seq, type, occurred_at, source_message_id, json)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    final.event_id,
+                    final.opportunity_id,
+                    final.seq,
+                    str(final.type),
+                    final.occurred_at.isoformat(),
+                    final.source_message_id,
+                    _dump(final),
+                ),
+            )
+            return final
+
+        return self._run_immediate(_txn)
+
+    @_locked
     def get_underwriting_run(self, run_id: str) -> UnderwritingResult | None:
-        row = self._conn.execute(
-            "SELECT json FROM underwriting_runs WHERE run_id = ?", (run_id,)
-        ).fetchone()
+        row = self._conn.execute("SELECT json FROM underwriting_runs WHERE run_id = ?", (run_id,)).fetchone()
         return _load(UnderwritingResult, row["json"]) if row else None
 
     @_locked
@@ -597,10 +695,55 @@ class Repo:
             """
             INSERT INTO outbound_drafts (draft_id, opportunity_id, status, created_at, json)
             VALUES (?, ?, ?, ?, ?)
+            ON CONFLICT(draft_id) DO UPDATE SET
+                opportunity_id = excluded.opportunity_id,
+                status = excluded.status,
+                created_at = excluded.created_at,
+                json = excluded.json
             """,
             (draft.draft_id, draft.opportunity_id, draft.status, draft.created_at.isoformat(), _dump(draft)),
         )
         self._conn.commit()
+
+    @_locked
+    def record_draft_delivery_failure(self, draft_id: str) -> int:
+        """Increment and return the persisted failed-delivery count for ``draft_id``."""
+        cursor = self._conn.execute(
+            "UPDATE outbound_drafts SET delivery_failures = delivery_failures + 1 WHERE draft_id = ?",
+            (draft_id,),
+        )
+        if cursor.rowcount != 1:
+            self._conn.rollback()
+            raise LookupError(f"No draft {draft_id!r}")
+        row = self._conn.execute(
+            "SELECT delivery_failures FROM outbound_drafts WHERE draft_id = ?", (draft_id,)
+        ).fetchone()
+        self._conn.commit()
+        return int(row["delivery_failures"])
+
+    @_locked
+    def draft_delivery_failures(self, draft_id: str) -> int:
+        """Return the number of failed transport attempts recorded for a draft."""
+        row = self._conn.execute(
+            "SELECT delivery_failures FROM outbound_drafts WHERE draft_id = ?", (draft_id,)
+        ).fetchone()
+        if row is None:
+            raise LookupError(f"No draft {draft_id!r}")
+        return int(row["delivery_failures"])
+
+    @_locked
+    def mark_draft_retry_escalated(self, draft_id: str) -> bool:
+        """CAS the one-time retry-escalation latch; return whether this caller set it."""
+        cursor = self._conn.execute(
+            """
+            UPDATE outbound_drafts
+               SET retry_escalated = 1
+             WHERE draft_id = ? AND retry_escalated = 0
+            """,
+            (draft_id,),
+        )
+        self._conn.commit()
+        return cursor.rowcount == 1
 
     @_locked
     def get_draft(self, draft_id: str) -> OutboundDraft | None:
@@ -708,10 +851,20 @@ class Repo:
             ).fetchall()
         return [_load(Notification, r["json"]) for r in rows]
 
+    @_locked
+    def get_notification(self, notification_id: str) -> Notification | None:
+        """Return one notification by primary key."""
+        row = self._conn.execute(
+            "SELECT json FROM notifications WHERE notification_id = ?", (notification_id,)
+        ).fetchone()
+        return _load(Notification, row["json"]) if row else None
+
     # ------------------------------------------------------------------ diligence & document analyses
 
     @_locked
     def store_diligence_request(self, request: DiligenceRequest) -> None:
+        if request.status == "overdue":
+            request = request.model_copy(update={"status": "sent"})
         self._conn.execute(
             """
             INSERT INTO diligence_requests
@@ -735,6 +888,8 @@ class Repo:
 
     @_locked
     def update_diligence_request(self, request: DiligenceRequest) -> None:
+        if request.status == "overdue":
+            request = request.model_copy(update={"status": "sent"})
         self._conn.execute(
             """
             UPDATE diligence_requests
@@ -806,17 +961,22 @@ class Repo:
         if opportunity_id is not None:
             query += " AND opportunity_id = ?"
             params.append(opportunity_id)
-        if status is not None:
-            query += " AND status = ?"
-            params.append(status)
         query += " ORDER BY created_at, rowid"
         rows = self._conn.execute(query, params).fetchall()
-        return [_load(DiligenceRequest, r["json"]) for r in rows]
+        projected: list[DiligenceRequest] = []
+        current = now_utc()
+        for row in rows:
+            request = _load(DiligenceRequest, row["json"])
+            if request.status == "sent" and request.due_at is not None and request.due_at < current:
+                request = request.model_copy(update={"status": "overdue"})
+            if status is None or request.status == status:
+                projected.append(request)
+        return projected
 
     @_locked
     def open_diligence_count(self) -> int:
         row = self._conn.execute(
-            "SELECT COUNT(*) AS c FROM diligence_requests WHERE status IN ('sent', 'overdue')"
+            "SELECT COUNT(*) AS c FROM diligence_requests WHERE status = 'sent'"
         ).fetchone()
         return row["c"]
 

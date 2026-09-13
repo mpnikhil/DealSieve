@@ -119,6 +119,8 @@ CREATE TABLE IF NOT EXISTS outbound_drafts (
     opportunity_id  TEXT NOT NULL REFERENCES opportunities(opportunity_id),
     status          TEXT NOT NULL,
     created_at      TEXT NOT NULL,
+    delivery_failures INTEGER NOT NULL DEFAULT 0,
+    retry_escalated INTEGER NOT NULL DEFAULT 0,
     json            TEXT NOT NULL
 );
 
@@ -200,12 +202,16 @@ def init_schema(conn: sqlite3.Connection) -> None:
     _ensure_column(conn, "diligence_requests", "due_at", "TEXT")
     _ensure_column(conn, "diligence_requests", "last_follow_up_at", "TEXT")
     _ensure_column(conn, "diligence_requests", "follow_up_reserved_at", "TEXT")
+    _ensure_column(conn, "outbound_drafts", "delivery_failures", "INTEGER NOT NULL DEFAULT 0")
+    _ensure_column(conn, "outbound_drafts", "retry_escalated", "INTEGER NOT NULL DEFAULT 0")
     # These indexes must be created after the column migrations.  Creating them in SCHEMA would
     # make initialization of a pre-Phase-2 database fail before `_ensure_column` can run.
     conn.execute("CREATE INDEX IF NOT EXISTS idx_inbound_messages_status ON inbound_messages(status)")
     # Nullable UNIQUE: SQLite treats every NULL as distinct, so legacy notifications without a
     # dedupe key remain valid while any non-null key stays unique.
-    conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_notifications_dedupe_key ON notifications(dedupe_key)")
+    conn.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_notifications_dedupe_key ON notifications(dedupe_key)"
+    )
     # Backfill scalar cadence fields for rows created by the original Phase-2 schema. These
     # columns make follow-up reservation a real SQL compare-and-swap rather than a JSON
     # read/modify/write race.

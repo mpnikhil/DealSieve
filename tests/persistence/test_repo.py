@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import sqlite3
 from datetime import UTC, datetime
 from decimal import Decimal
 
@@ -78,7 +79,12 @@ def _underwriting_result(opportunity_id: str, *, created_at: datetime | None = N
         vacancy_loss=Decimal("9000"),
         effective_gross_income=Decimal("171500.50"),
         expenses=[
-            ExpenseLine(name="property_tax", broker=Decimal("15500"), normalized=Decimal("19375"), basis="1.25% of price"),
+            ExpenseLine(
+                name="property_tax",
+                broker=Decimal("15500"),
+                normalized=Decimal("19375"),
+                basis="1.25% of price",
+            ),
             ExpenseLine(name="management", broker=None, normalized=Decimal("8575.025"), basis="5% of EGI"),
         ],
         total_expenses=Decimal("50000.025"),
@@ -144,8 +150,11 @@ def _underwriting_result(opportunity_id: str, *, created_at: datetime | None = N
     )
     stress = [
         StressResult(
-            scenario="vacancy_20pct", noi=Decimal("110000"), dscr=Decimal("0.95"),
-            cash_flow_after_debt=Decimal("11608.16"), covers_debt=False,
+            scenario="vacancy_20pct",
+            noi=Decimal("110000"),
+            dscr=Decimal("0.95"),
+            cash_flow_after_debt=Decimal("11608.16"),
+            covers_debt=False,
         )
     ]
     comparison = [
@@ -170,7 +179,32 @@ def _underwriting_result(opportunity_id: str, *, created_at: datetime | None = N
     return UnderwritingResult(**kwargs)
 
 
-def _property(repo, address="1234 Power Inn Road", city="Sacramento", state="CA", zip_="95826", apn=None) -> Property:
+def test_record_underwriting_inserts_run_and_event_atomically(repo) -> None:
+    prop = _property(repo)
+    opp = repo.create_opportunity(Opportunity(property_id=prop.property_id, display_name="Atomic run"))
+    run = _underwriting_result(opp.opportunity_id)
+    event = OpportunityEvent(
+        opportunity_id=opp.opportunity_id,
+        type=EventType.UNDERWRITING_COMPLETED,
+        summary="Atomic underwriting",
+        payload={"run_id": run.run_id},
+    )
+
+    stored = repo.record_underwriting(run, event)
+
+    assert stored.seq == 1
+    assert repo.get_underwriting_run(run.run_id) == run
+    assert repo.list_events(opp.opportunity_id) == [stored]
+
+    duplicate = event.model_copy(update={"event_id": "evt_second"})
+    with pytest.raises(sqlite3.IntegrityError):
+        repo.record_underwriting(run, duplicate)
+    assert len(repo.list_events(opp.opportunity_id)) == 1
+
+
+def _property(
+    repo, address="1234 Power Inn Road", city="Sacramento", state="CA", zip_="95826", apn=None
+) -> Property:
     normalized = normalize_address(address, city, state, zip_)
     prop = Property(
         canonical_address=f"{address}, {city}, {state} {zip_}",
@@ -185,7 +219,9 @@ def _property(repo, address="1234 Power Inn Road", city="Sacramento", state="CA"
     return repo.upsert_property(prop)
 
 
-def _opportunity(repo, prop: Property, display_name="8-unit small-bay industrial", status=OpportunityStatus.WATCH) -> Opportunity:
+def _opportunity(
+    repo, prop: Property, display_name="8-unit small-bay industrial", status=OpportunityStatus.WATCH
+) -> Opportunity:
     opp = Opportunity(
         property_id=prop.property_id,
         display_name=display_name,
@@ -277,7 +313,10 @@ def test_evidence_round_trip(repo):
     reloaded = repo.list_evidence(opp.opportunity_id)
     assert len(reloaded) == 2
     assert {e.evidence_id for e in reloaded} == {e.evidence_id for e in evidence}
-    assert reloaded[0].source_timestamp == evidence[0].source_timestamp or reloaded[1].source_timestamp == evidence[0].source_timestamp
+    assert (
+        reloaded[0].source_timestamp == evidence[0].source_timestamp
+        or reloaded[1].source_timestamp == evidence[0].source_timestamp
+    )
 
 
 def test_skeptic_report_round_trip(repo):
@@ -409,10 +448,14 @@ def test_append_event_assigns_monotonic_seq_and_history_is_immutable(repo):
     opp = _opportunity(repo, prop)
 
     e1 = repo.append_event(
-        OpportunityEvent(opportunity_id=opp.opportunity_id, type=EventType.DEAL_DISCOVERED, summary="Discovered")
+        OpportunityEvent(
+            opportunity_id=opp.opportunity_id, type=EventType.DEAL_DISCOVERED, summary="Discovered"
+        )
     )
     e2 = repo.append_event(
-        OpportunityEvent(opportunity_id=opp.opportunity_id, type=EventType.CLAIMS_EXTRACTED, summary="Claims in")
+        OpportunityEvent(
+            opportunity_id=opp.opportunity_id, type=EventType.CLAIMS_EXTRACTED, summary="Claims in"
+        )
     )
     e3 = repo.append_event(
         OpportunityEvent(
@@ -433,7 +476,9 @@ def test_append_event_assigns_monotonic_seq_and_history_is_immutable(repo):
     prop2 = _property(repo, address="42 Other Ave")
     opp2 = _opportunity(repo, prop2, display_name="Second deal")
     e_other = repo.append_event(
-        OpportunityEvent(opportunity_id=opp2.opportunity_id, type=EventType.DEAL_DISCOVERED, summary="Discovered 2")
+        OpportunityEvent(
+            opportunity_id=opp2.opportunity_id, type=EventType.DEAL_DISCOVERED, summary="Discovered 2"
+        )
     )
     assert e_other.seq == 1
 
@@ -456,7 +501,9 @@ def test_watchlist_orders_review_near_watch_then_by_distance(repo):
     def make(status, distance, name):
         prop = _property(repo, address=f"{name} Ave")
         opp = _opportunity(repo, prop, display_name=name, status=status)
-        viability = ViabilityFrontier(current_price=Decimal("1000000"), max_viable_price=Decimal("900000"), distance_pct=distance)
+        viability = ViabilityFrontier(
+            current_price=Decimal("1000000"), max_viable_price=Decimal("900000"), distance_pct=distance
+        )
         saved = repo.save_opportunity(opp.model_copy(update={"viability": viability}))
         return saved
 
@@ -475,7 +522,9 @@ def test_watchlist_orders_review_near_watch_then_by_distance(repo):
 def test_watchlist_puts_missing_distance_last_within_status(repo):
     prop1 = _property(repo, address="1 No Distance Ave")
     opp1 = _opportunity(repo, prop1, display_name="NoDistance", status=OpportunityStatus.WATCH)
-    repo.save_opportunity(opp1.model_copy(update={"viability": ViabilityFrontier(current_price=Decimal("1"))}))
+    repo.save_opportunity(
+        opp1.model_copy(update={"viability": ViabilityFrontier(current_price=Decimal("1"))})
+    )
 
     prop2 = _property(repo, address="2 Has Distance Ave")
     opp2 = _opportunity(repo, prop2, display_name="HasDistance", status=OpportunityStatus.WATCH)
@@ -509,7 +558,9 @@ def test_dashboard_stats_counts_statuses_and_7day_events(repo):
         )
     )
     repo.append_event(
-        OpportunityEvent(opportunity_id=opp3.opportunity_id, type=EventType.HUMAN_NOTIFIED, summary="notified")
+        OpportunityEvent(
+            opportunity_id=opp3.opportunity_id, type=EventType.HUMAN_NOTIFIED, summary="notified"
+        )
     )
     # An old event (outside the 7-day window) must not be counted.
     old_event = OpportunityEvent(
@@ -539,7 +590,9 @@ def test_opportunity_detail_accepts_id_or_deal_number(repo):
     repo.store_underwriting_run(run)
     saved = repo.save_opportunity(opp.model_copy(update={"latest_run_id": run.run_id}))
     repo.append_event(
-        OpportunityEvent(opportunity_id=opp.opportunity_id, type=EventType.DEAL_DISCOVERED, summary="Discovered")
+        OpportunityEvent(
+            opportunity_id=opp.opportunity_id, type=EventType.DEAL_DISCOVERED, summary="Discovered"
+        )
     )
 
     by_id = repo.opportunity_detail(opp.opportunity_id)

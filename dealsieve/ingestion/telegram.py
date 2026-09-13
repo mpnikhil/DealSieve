@@ -4,8 +4,8 @@ Long-polls ``getUpdates``: plain text becomes an ``InboundMessage`` via ``from_t
 run through the full pipeline; documents are downloaded via ``getFile`` and attached, with PDF text
 extracted via ``pypdf``; ``/status`` and ``/deal <n>`` are answered directly from the repo; a
 ``callback_query`` (from the inline keyboard `dealsieve.notifications.telegram.TelegramNotifier` sends,
-``callback_data`` = ``"<action>:<opportunity_id>"``) approves/rejects the opportunity's pending draft or
-records that the human chose "ignore"/"review". Exits cleanly on Ctrl-C.
+draft-specific approve/reject callback data and opportunity-specific ignore/review callback data) routes
+through the same audited diligence actions as the API. Exits cleanly on Ctrl-C.
 """
 
 from __future__ import annotations
@@ -18,12 +18,14 @@ from typing import Any
 
 import httpx
 
+from dealsieve.diligence import acknowledge_opportunity, approve_and_send, reject_draft
 from dealsieve.ingestion.text import from_text
 from dealsieve.notifications import Notifier, get_notifier
+from dealsieve.outbound import Outbox, get_outbox
 from dealsieve.persistence import Repo
 from dealsieve.pipeline import process_inbound
 from dealsieve.policy import InvestmentPolicy, load_policy
-from dealsieve.schemas import Actor, Attachment, Channel, EventType, OpportunityEvent, now_utc
+from dealsieve.schemas import Attachment, Channel
 
 TELEGRAM_API_BASE = "https://api.telegram.org"
 POLL_TIMEOUT_S = 30
@@ -52,6 +54,8 @@ class TelegramBot:
     repo: Repo
     policy: InvestmentPolicy
     notifier: Notifier = field(default_factory=get_notifier)
+    outbox: Outbox | None = None
+    authorized_chat_id: str | None = None
     client: httpx.Client = field(default_factory=lambda: httpx.Client(timeout=POLL_TIMEOUT_S + 10))
 
     @classmethod
@@ -61,10 +65,19 @@ class TelegramBot:
         token = os.environ.get("TELEGRAM_BOT_TOKEN")
         if not token:
             raise RuntimeError("TELEGRAM_BOT_TOKEN is not set")
+        chat_id = os.environ.get("TELEGRAM_CHAT_ID")
+        if not chat_id:
+            raise RuntimeError("TELEGRAM_CHAT_ID is not set")
         repo = Repo()
         repo.init_schema()
         policy = load_policy()
-        return cls(token=token, repo=repo, policy=policy)
+        return cls(
+            token=token,
+            repo=repo,
+            policy=policy,
+            outbox=get_outbox(policy),
+            authorized_chat_id=chat_id,
+        )
 
     # ------------------------------------------------------------------------------- Telegram API helpers
 
@@ -126,40 +139,38 @@ class TelegramBot:
         data = callback_query.get("data") or ""
         chat = (callback_query.get("message") or {}).get("chat") or {}
         chat_id = chat.get("id")
-        action, _, opportunity_id = data.partition(":")
+        action, separator, target_id = data.partition(":")
+
+        configured_chat_id = self.authorized_chat_id
+        if configured_chat_id is None:
+            import os
+
+            configured_chat_id = os.environ.get("TELEGRAM_CHAT_ID")
+        if chat_id is None or configured_chat_id is None or str(chat_id) != str(configured_chat_id):
+            self._answer_callback(callback_id, "This chat is not authorized for DealSieve actions.")
+            return
+        if not separator or not target_id:
+            self._answer_callback(callback_id, "Invalid action.")
+            return
+
+        principal = f"human:telegram:{chat_id}"
 
         try:
-            if action in ("approve", "reject"):
-                pending = [d for d in self.repo.list_drafts(opportunity_id=opportunity_id) if d.status == "pending"]
-                if not pending:
-                    self._answer_callback(callback_id, "No pending draft for this deal.")
-                    return
-                draft = pending[0]
-                new_status = "approved" if action == "approve" else "rejected"
-                updated = draft.model_copy(update={"status": new_status, "decided_at": now_utc()})
-                self.repo.update_draft(updated)
-                self.repo.append_event(
-                    OpportunityEvent(
-                        opportunity_id=draft.opportunity_id,
-                        type=EventType.HUMAN_APPROVED_DRAFT if action == "approve" else EventType.HUMAN_REJECTED_DRAFT,
-                        actor=Actor.HUMAN,
-                        summary=f"Human {new_status} broker draft {draft.draft_id} via Telegram",
-                        payload={"draft_id": draft.draft_id},
-                    )
+            if action == "approve":
+                sent = approve_and_send(
+                    target_id,
+                    repo=self.repo,
+                    policy=self.policy,
+                    outbox=self.outbox or get_outbox(self.policy),
+                    principal=principal,
                 )
-                self._answer_callback(callback_id, f"Draft {new_status}.")
-                if chat_id is not None:
-                    self._send_text(chat_id, f"Draft {new_status}. Nothing was sent to the broker.")
+                self._answer_callback(callback_id, "Approved and sent.")
+                self._send_text(chat_id, f"Sent to {sent.to_email or 'the broker'}: {sent.subject}")
+            elif action == "reject":
+                reject_draft(target_id, repo=self.repo, principal=principal)
+                self._answer_callback(callback_id, "Rejected.")
             elif action in ("review", "ignore"):
-                self.repo.append_event(
-                    OpportunityEvent(
-                        opportunity_id=opportunity_id,
-                        type=EventType.NOTE,
-                        actor=Actor.HUMAN,
-                        summary=f"Human chose '{action}' from the alert.",
-                        payload={"action": action},
-                    )
-                )
+                acknowledge_opportunity(target_id, repo=self.repo, principal=principal)
                 self._answer_callback(callback_id, "Noted." if action == "ignore" else "Opening review.")
             else:
                 self._answer_callback(callback_id)
@@ -190,7 +201,9 @@ class TelegramBot:
             return
 
         try:
-            inbound = self._build_inbound(chat_id, text=text, document=document, caption=message.get("caption"))
+            inbound = self._build_inbound(
+                chat_id, text=text, document=document, caption=message.get("caption")
+            )
         except Exception as exc:
             self._send_text(chat_id, f"Sorry, I couldn't read that: {exc}")
             return
@@ -198,7 +211,13 @@ class TelegramBot:
             return
 
         try:
-            outcome = process_inbound(inbound, repo=self.repo, policy=self.policy, notifier=self.notifier)
+            outcome = process_inbound(
+                inbound,
+                repo=self.repo,
+                policy=self.policy,
+                notifier=self.notifier,
+                outbox=self.outbox,
+            )
             self._send_text(chat_id, outcome.summary)
         except Exception as exc:
             self._send_text(chat_id, f"Sorry, I couldn't process that: {exc}")

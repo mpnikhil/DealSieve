@@ -23,9 +23,8 @@ class _HttpPoster(Protocol):
 class TelegramNotifier:
     """Sends the alert to a single chat, with an inline keyboard built from ``notification.actions``.
 
-    ``callback_data`` for each button is ``"<action>:<opportunity_id>"`` (e.g. "review:opp_abc123") so the
-    long-polling bot (dealsieve/ingestion/telegram.py) can dispatch the callback_query without any extra
-    lookup.
+    Review/ignore buttons target the opportunity; approve/reject buttons target the exact draft
+    supplied by the alert formatter.
     """
 
     name = "telegram"
@@ -56,12 +55,21 @@ class TelegramNotifier:
                 [
                     {
                         "text": action.label,
-                        "callback_data": f"{action.action}:{notification.opportunity_id}",
+                        "callback_data": self._callback_data(notification, action.action),
                     }
                     for action in notification.actions
                 ]
             ]
         }
+
+    @staticmethod
+    def _callback_data(notification: Notification, action: str) -> str:
+        if action in {"approve", "reject"}:
+            draft_id = getattr(notification, "_telegram_draft_id", None)
+            if draft_id is None:
+                raise ValueError(f"Telegram {action} action is missing its draft id")
+            return f"{action}:{draft_id}"
+        return f"{action}:{notification.opportunity_id}"
 
     def send(self, notification: Notification) -> str | None:
         text = f"{notification.title}\n\n{notification.body}" if notification.body else notification.title
