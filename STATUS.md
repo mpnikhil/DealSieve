@@ -1,32 +1,32 @@
 # Current Status
 
-Last updated: 2026-09-13 (morning PDT). Submission deadline: 2026-09-14 17:00 PDT.
+Last updated: 2026-09-13 14:35 PDT. Submission deadline: 2026-09-14 17:00 PDT.
 
 ## Completed
-- Phase 1: deterministic underwriting engine, immutable policy, SQLite event store, identity resolution, .eml ingestion, Strands Acquisition and Skeptic agents, `CLIModel` (claude/codex/agy) and `ScriptedModel` providers, FastAPI + React dashboard, console/Telegram notifiers, CLI, AgentCore entrypoint.
-- Phase 2: autonomous diligence loop with humans in the loop. Skeptic concerns become tracked requests; the first broker message waits for one-tap approval; follow-ups on approved threads are automatic (3 days, max 2) and stall with a single alert; the Inspector agent reads inspection reports and their photos; verified capex enters the all-in basis; the deal is re-underwritten; money talk is always drafted for approval. Dashboard: Diligence, Correspondence, Documents panels.
-- Two Codex adversarial reviews (18 findings) fixed with regression tests: full-precision gates, fail-closed inputs, tool phase machine and latches, message processing states, notification dedupe and delivery truth, contradiction-aware identity, evidence-derived reconciliation, approver gate, atomic approval, broad money screen, reserved follow-ups, verified/aggregated capex, image containment.
-- Live-model robustness: subject-line prices never re-set the ask; any skeptic concern with a broker question is chased; Codex receives the prompt on stdin when images are attached.
-- 366 offline tests green; both end-to-end specs green; ruff clean.
+- Phase 1: deterministic underwriting engine, immutable policy, SQLite event store, identity resolution, .eml ingestion, Strands Acquisition and Skeptic agents, `CLIModel` (claude/codex/agy) and `ScriptedModel` providers, FastAPI + React dashboard, console/Telegram notifiers, CLI, AgentCore entrypoint (deployed; see deploys/LEDGER.tsv).
+- Phase 2: diligence loop with humans in the loop. Skeptic concerns become tracked requests; the first broker message waits for one-tap approval (API or Telegram, both gated); follow-ups on approved threads are automatic (3 days, max 2) and stall with one alert; the Inspector agent reads inspection reports and photos; capex is verified against the document text and aggregated across documents; the deal is re-underwritten on the all-in basis; money talk always waits for approval.
+- Phase 3: decision memory. Approvals, rejections with reasons, alert acknowledgements and broker behaviour are recorded (local SQLite by default, AgentCore Memory with write-through when configured), recalled on the deal page and `/memory`, and fed to the skeptic, the credit rationale and the alerts.
+- Assurance: two Codex adversarial reviews and a TLA-style audit (docs/STATE_MACHINE.md: state variables, transitions, S1-S12 safety, L1-L5 liveness, 26 findings, all fixed) plus a seeded trace explorer (tests/model; 2000 traces pass). 467 offline tests green; ruff clean.
+- Live model runs: acts 1-2 through Claude Sonnet, Gemini Flash and Codex; act 3 with photos through Codex.
 
-## Verified end to end
-- Offline (`make demo-offline` + approve + inject 05 + three `followup` ticks): WATCH -> REVIEW (one alert, request awaiting approval) -> approved and sent -> inspection report read (3 photos) -> $90,000 verified capex -> NEAR at $1,208,108 (second alert, $42,000 credit request pending) -> two follow-ups -> stall (third alert). Replayed approval does not resend.
-- Live: acts 1 and 2 through Claude Sonnet, Gemini Flash (agy) and Codex; act 3 through Codex with the three photos attached (12 findings, 3 capex items, REVIEW -> NEAR, credit draft pending).
+## Working Now
+- Agent-side memory consumption (skeptic prompt block, credit rationale sentence, "You previously:" alert line).
+- Demo video production (kept out of the repo).
 
 ## Blockers
-- AgentCore Runtime deployed from another session (see deploys/LEDGER.tsv); the model path waits on a new account's Bedrock tokens-per-day quota (0, auto-lifts). No AWS credentials on this build machine.
-- No Telegram bot token: Telegram delivery and inline approval untested (console notifier and dashboard approval verified).
+- Bedrock tokens-per-day quota on the new account (0, auto-lifts): the deployed runtime answers status invocations; the model path waits.
+- No Telegram bot token on this machine: Telegram delivery and inline approval untested live (console notifier and dashboard approval verified).
 
 ## Next Three Tasks
-1. Record the demo video from docs/DEMO_SCRIPT.md (three acts, <= 5:00) and submit on Devpost with docs/SUBMISSION.md.
-2. When the Bedrock quota lifts: run the two-email story against the deployed runtime, log the row in deploys/LEDGER.tsv, add the runtime to the submission.
-3. If a Telegram token arrives: run `dealsieve telegram-bot`, approve the information request from the phone, screenshot for the video.
+1. Finish and review the demo video; submit on Devpost with docs/SUBMISSION.md.
+2. When the Bedrock quota lifts, run the two-email story against the deployed runtime and log it in deploys/LEDGER.tsv.
+3. If a Telegram token arrives, approve the information request from the phone and capture it for the video.
 
 ## Demo Health
-Offline three-act story: PASS
+Offline three-act story (+ follow-ups, memory): PASS
 Live acts 1-2 (claude / agy / codex): PASS
 Live act 3 with photos (codex): PASS
-Dashboard against live data: PASS
+Dashboard against live data (incl. memory panels): PASS
+Trace explorer 2000 traces: PASS
 Telegram: UNTESTED (no token)
-SES: NOT BUILT (file outbox stands in; SMTP/SES adapters behind the same interface)
 AgentCore: DEPLOYED, status path PASS, model path PENDING Bedrock quota
