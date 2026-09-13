@@ -1,0 +1,6 @@
+# Deploy ledger — append-only. One row per AgentCore deploy. Tab-separated. Never rewrite a row.
+# Append with scripts/log_deploy.sh (fills ts_utc + git_sha for you). See README "AgentCore deployment".
+# Columns: ts_utc  target  endpoint  image_digest  git_sha  bedrock_model  result  notes
+# result: ok | failed | rolled-back.  notes: free text (e.g. token burn per run from the smoke test).
+ts_utc	target	endpoint	image_digest	git_sha	bedrock_model	result	notes
+2026-09-13T04:31:17Z	agentcore-runtime	arn:aws:bedrock-agentcore:us-west-2:461701714155:runtime/dealsieve-YI2gyeFXpz	direct-code-deploy	f6fa534	global.anthropic.claude-sonnet-4-6	ok	status invoke OK; email/model path pending Bedrock TPD quota (0, non-adjustable, auto-lifts)
