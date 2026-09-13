@@ -184,7 +184,7 @@ dealsieve followup --as-of 2026-09-25
 
 ### 4:40–5:00 — impact and close (dashboard overview: stat strip)
 
-**Screen:** the overview page's stat strip — 13 encountered, 5 dead, 6 watch, 1 near, 0 review, 3 interruptions this week.
+**Screen:** the overview page's stat strip — 13 encountered, 5 dead, 6 watching, 2 near, 0 review, 3 interruptions.
 
 **Voice-over:**
 > "Thirteen opportunities encountered. Five dead on structure. Six still watched. One near the line. Zero under review. Three total interruptions."

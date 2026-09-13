@@ -166,7 +166,17 @@ def _cmd_followup(args: argparse.Namespace) -> int:
         notifier=get_notifier(),
         as_of=as_of,
     )
-    print(json.dumps(report.model_dump(mode="json"), default=str, indent=2))
+    if getattr(args, "json", False):
+        print(json.dumps(report.model_dump(mode="json"), default=str, indent=2))
+        return 0
+    topics = sorted({getattr(r, "topic", str(r)) for r in report.requests_followed_up})
+    print(f"As of {str(report.as_of)[:10]}: follow-ups sent {report.follow_ups_sent}, stalled {report.stalled}")
+    if topics:
+        print("Followed up: " + ", ".join(topics))
+    if report.notifications:
+        print(f"Notifications: {len(report.notifications)}")
+    if getattr(report, "failed_inbound_messages", None):
+        print(f"Failed inbound messages awaiting retry: {len(report.failed_inbound_messages)}")
     return 0
 
 
@@ -231,7 +241,17 @@ def _cmd_retry(args: argparse.Namespace) -> int:
     repo.init_schema()
     policy = load_policy(args.policy) if args.policy else load_policy()
     report = sweep(repo, policy, get_outbox(policy), get_notifier(), datetime.now(UTC))
-    print(json.dumps(report.model_dump(mode="json"), default=str, indent=2))
+    if getattr(args, "json", False):
+        print(json.dumps(report.model_dump(mode="json"), default=str, indent=2))
+        return 0
+    topics = sorted({getattr(r, "topic", str(r)) for r in report.requests_followed_up})
+    print(f"As of {str(report.as_of)[:10]}: follow-ups sent {report.follow_ups_sent}, stalled {report.stalled}")
+    if topics:
+        print("Followed up: " + ", ".join(topics))
+    if report.notifications:
+        print(f"Notifications: {len(report.notifications)}")
+    if getattr(report, "failed_inbound_messages", None):
+        print(f"Failed inbound messages awaiting retry: {len(report.failed_inbound_messages)}")
     return 0
 
 
@@ -267,6 +287,8 @@ def build_parser() -> argparse.ArgumentParser:
     p_status.set_defaults(func=_cmd_status)
 
     p_followup = sub.add_parser("followup", help="Send due approved-thread follow-ups and escalate stalls.")
+
+    p_followup.add_argument("--json", action="store_true", help="Print the raw report as JSON.")
     p_followup.add_argument("--as-of", default=None, help="Run cadence as of YYYY-MM-DD or ISO-8601 datetime")
     p_followup.add_argument("--db", default=None, help="Override DEALSIEVE_DB_PATH")
     p_followup.add_argument("--policy", default=None, help="Override DEALSIEVE_POLICY_PATH")
