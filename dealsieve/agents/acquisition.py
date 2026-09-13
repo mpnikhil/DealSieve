@@ -45,6 +45,9 @@ attachment filename for anything taken from an offering memorandum or other atta
 - Copy the rent roll into `tenants` when one is present: name, suite, sqft, annual rent, lease end.
 - If the email body and the attachment disagree, record both evidence entries. Do not silently \
 pick one; the reconciler records the conflict.
+- The subject line of a reply ("Re: ...") repeats the ORIGINAL listing. Never take `asking_price` or any \
+other number from a subject line; a price counts only when the body or an attachment states it. A reply \
+that only attaches documents carries no `asking_price` at all.
 - Set `is_price_change` to true when the message is a reply that mainly restates the price \
 (e.g. "seller reduced this to $1.25M"). Such a reply usually carries nothing else: record the new \
 `asking_price`, its single evidence entry, and leave every other field null. Do not repeat facts \
@@ -61,12 +64,11 @@ underwritten on, so this always comes before underwriting.
 4. Read `threshold_crossed` and `threshold_lost` in the result. Exactly one branch applies:
    - `threshold_crossed` is true -- the deal just became investable:
      a. `request_skeptic_review`.
-     b. `request_diligence` with the skeptic's concerns whose `evidence_status` is exactly \
-"missing" AND that have a `question_for_broker`. One item per concern: `topic` copied from the \
-concern, `question` copied from its `question_for_broker`. Do NOT include concerns rated "weak", \
-"unverified" or "contradicted" -- those are judgements about evidence that already exists, and \
-asking the broker about them wastes the buyer's credibility. If no concern qualifies, skip \
-straight to `notify_human`.
+     b. `request_diligence` with the skeptic's concerns that carry a `question_for_broker` and whose \
+`evidence_status` is "missing", "weak" or "unverified" (never "contradicted": contradictions are for \
+the human). One item per concern, at most 5, "missing" first: `topic` copied from the concern, \
+`question` copied from its `question_for_broker`. If no concern qualifies, skip straight to \
+`notify_human`.
      c. `notify_human` with one short line on why this matters now.
    - `threshold_lost` is true -- diligence pushed a deal you were pursuing back out of reach:
      a. `request_price_adjustment` with `amount` = the current asking price minus the maximum \

@@ -822,15 +822,27 @@ class DiligenceItem(BaseModel):
     category: Literal["document", "disclosure", "clarification"] = "document"
 
 
-def diligence_items_from(report: SkepticReport | None) -> list[dict[str, Any]]:
-    """The skeptic concerns worth chasing: evidence_status "missing", with a question to ask.
+MAX_DILIGENCE_ITEMS = 5
+_CHASE_ORDER = {"missing": 0, "weak": 1, "unverified": 2}
 
-    Only "missing". A concern the skeptic rated "weak" or "unverified" is a judgement about
-    evidence that does exist, and emailing the broker about it wastes the one thing this loop
-    spends carelessly if unchecked -- the buyer's credibility with the broker.
+
+def diligence_items_from(report: SkepticReport | None) -> list[dict[str, Any]]:
+    """The skeptic concerns worth chasing with the broker.
+
+    A concern qualifies when the skeptic wrote a concrete `question_for_broker` and the evidence is not
+    "contradicted" (a contradiction is for the human to weigh, not for the broker to paper over).
+    "missing" concerns come first, then "weak", then "unverified"; at most MAX_DILIGENCE_ITEMS are chased
+    so one email never reads like an audit. Real models label evidence inconsistently, which is why the
+    rule keys on the presence of a question rather than on one exact label.
     """
     if report is None:
         return []
+    eligible = [
+        concern
+        for concern in report.concerns
+        if concern.question_for_broker and concern.evidence_status in _CHASE_ORDER
+    ]
+    eligible.sort(key=lambda concern: _CHASE_ORDER[concern.evidence_status])
     return [
         {
             "topic": concern.topic,
@@ -838,8 +850,7 @@ def diligence_items_from(report: SkepticReport | None) -> list[dict[str, Any]]:
             "category": "document",
             "source_concern": concern.topic,
         }
-        for concern in report.concerns
-        if concern.evidence_status == "missing" and concern.question_for_broker
+        for concern in eligible[:MAX_DILIGENCE_ITEMS]
     ]
 
 
@@ -1243,7 +1254,7 @@ def make_tools(session: ProcessingSession) -> list[Any]:
 
         Only allowed on a REVIEW opportunity, once per message. Each item becomes a tracked
         diligence request that is followed up on the policy cadence until it is answered. Pass the
-        skeptic's concerns whose evidence_status is "missing" and that carry a question for the
+        skeptic's concerns that carry a question for the broker (missing, weak or unverified evidence) for the
         broker -- nothing else. The message itself is composed and screened in code; whether it is
         sent now or waits for a human tap is the outreach policy's decision, not yours.
 

@@ -5,7 +5,15 @@ from decimal import Decimal
 import pytest
 
 from dealsieve.evidence.reconcile import MissingInputs, reconcile
-from dealsieve.schemas import CapexItem, EventType, Evidence, ExpenseClaims, ExtractedClaims, TenantClaim
+from dealsieve.schemas import (
+    CapexItem,
+    EventType,
+    Evidence,
+    ExpenseClaims,
+    ExtractedClaims,
+    TenantClaim,
+    WorkingValues,
+)
 
 
 def test_first_claims_establish_working_values_from_gross_income():
@@ -302,3 +310,41 @@ def test_reconcile_preserves_capex_added_by_document_analysis():
 
     assert updated.immediate_capex == Decimal("90000")
     assert updated.capex_items == [capex]
+
+
+def _existing_at(price: str) -> WorkingValues:
+    from decimal import Decimal as _D
+
+    return WorkingValues(asking_price=_D(price), gross_scheduled_income=_D("180000"))
+
+
+def test_reply_subject_price_does_not_change_the_asking_price():
+    """A 'Re: ... $1.55M' subject echoing the original listing must not re-set the price."""
+    from decimal import Decimal as _D
+
+    from dealsieve.schemas import Evidence, ExtractedClaims
+
+    claims = ExtractedClaims(
+        asking_price=_D("1550000"),
+        is_price_change=False,
+        evidence=[Evidence(field="asking_price", value=1550000, source_document="msg-3", location="email subject", confidence=0.9)],
+    )
+    working, changes = reconcile(_existing_at("1250000"), claims)
+    assert working.asking_price == _D("1250000")
+    assert changes == []
+    assert any("restated without a change announcement" in c for c in working.conflicts)
+
+
+def test_new_price_in_body_or_attachment_still_counts_without_the_flag():
+    from decimal import Decimal as _D
+
+    from dealsieve.schemas import EventType, Evidence, ExtractedClaims
+
+    claims = ExtractedClaims(
+        asking_price=_D("1200000"),
+        is_price_change=False,
+        evidence=[Evidence(field="asking_price", value=1200000, source_document="Updated_OM.pdf", location="OM page 1", confidence=0.95)],
+    )
+    working, changes = reconcile(_existing_at("1250000"), claims)
+    assert working.asking_price == _D("1200000")
+    assert [c.type for c in changes] == [EventType.ASKING_PRICE_CHANGED]

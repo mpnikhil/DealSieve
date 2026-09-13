@@ -181,6 +181,17 @@ def _resolve_provenance_and_conflicts(
     return provenance, conflicts, overrides
 
 
+def _price_restated_without_change(claims: ExtractedClaims) -> bool:
+    """True when a differing asking_price should be ignored: the message does not announce a price change
+    and every piece of price evidence comes from the subject line (or there is none at all)."""
+    if claims.is_price_change:
+        return False
+    price_evidence = [e for e in claims.evidence if e.field == "asking_price"]
+    if not price_evidence:
+        return True
+    return all("subject" in (e.location or "").lower() for e in price_evidence)
+
+
 def reconcile(existing: WorkingValues | None, claims: ExtractedClaims) -> tuple[WorkingValues, list[DetectedChange]]:
     provenance, conflicts, evidence_overrides = _resolve_provenance_and_conflicts(
         claims,
@@ -194,6 +205,14 @@ def reconcile(existing: WorkingValues | None, claims: ExtractedClaims) -> tuple[
         return evidence_overrides[field_name] if field_name in evidence_overrides else claim_value
 
     new_price = _effective("asking_price", claims.asking_price)
+    if existing is not None and new_price is not None and new_price != existing.asking_price:
+        if _price_restated_without_change(claims):
+            # A reply whose "Re: ... $1.55M" subject echoes the original listing is not a new price.
+            conflicts.append(
+                f"Ignored asking price ${new_price:,.0f} restated without a change announcement "
+                f"(no body or attachment evidence); kept ${existing.asking_price:,.0f}"
+            )
+            new_price = None
     if new_price is not None:
         asking_price = new_price
     elif existing is not None:

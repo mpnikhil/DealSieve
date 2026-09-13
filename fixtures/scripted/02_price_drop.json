@@ -97,7 +97,7 @@
           "severity": "medium",
           "why_it_matters": "The rent roll lists lease end dates but nothing about renewal intent, options, or how the in-place rents compare to market. Several leases rolling in the same window would put a meaningful share of the income at risk right after closing.",
           "evidence_status": "weak",
-          "question_for_broker": "Which tenants have renewal options or have signalled renewal intent, and how do the in-place rents compare to current market rents for comparable small-bay space?"
+          "question_for_broker": null
         }
       ]
     }
