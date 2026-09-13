@@ -16,6 +16,8 @@ Covers:
 from __future__ import annotations
 
 import email
+import threading
+import time
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from email.parser import BytesParser
@@ -23,6 +25,7 @@ from email.parser import BytesParser
 import pytest
 
 from dealsieve.diligence import (
+    DraftNotPending,
     apply_answers,
     approve_and_send,
     build_requests,
@@ -82,17 +85,42 @@ def _make_opp(repo: Repo, display_name: str = "Test Property") -> Opportunity:
 @pytest.mark.parametrize(
     ("text", "expected"),
     [
-        ("Please send over the roof warranty and age.", "information_request"),
+        ("Can you provide the CAM reconciliation for the trailing twelve months?", "information_request"),
+        ("What is the roof's age and replacement history?", "information_request"),
+        ("Please send over the annual operating budget.", "information_request"),
         ("Could we get a copy of the Phase I ESA?", "information_request"),
+        ("Please confirm the tenant rollover schedule.", "information_request"),
         ("Attached is our LOI for your review.", "offer"),
         ("We are submitting a letter of intent on this property.", "offer"),
         ("Please find our purchase agreement attached.", "offer"),
         ("This represents our offer of $1.2M.", "offer"),
+        ("We intend to submit a bid tomorrow.", "offer"),
+        ("Our proposal is attached.", "offer"),
+        ("Please review the PSA.", "offer"),
+        ("We would like to make an offer.", "offer"),
         ("Would the seller consider a $42,000 credit for the roof?", "credit_request"),
+        ("The purchase price would need adjustment.", "credit_request"),
+        ("Price remains our main concern.", "credit_request"),
+        ("The consideration is subject to diligence.", "credit_request"),
+        ("We can put up earnest money promptly.", "credit_request"),
+        ("The deposit should be refundable.", "credit_request"),
+        ("Please confirm escrow mechanics.", "credit_request"),
+        ("We need a financing contingency.", "credit_request"),
+        ("The inspection period should be 30 days.", "credit_request"),
+        ("Can we move the closing date?", "credit_request"),
+        ("Close of escrow would be next quarter.", "credit_request"),
+        ("Seller carry could bridge the gap.", "credit_request"),
         ("We request a price reduction of $50,000 given the condition report.", "credit_request"),
         ("Can we discuss a discount or seller concession?", "credit_request"),
         ("We would pay $1,200,000 based on the capex requirements.", "credit_request"),
         ("Could the seller offer terms on the financing?", "credit_request"),
+        ("The seller mentioned 1.2 million.", "credit_request"),
+        ("We could proceed at 1.2M.", "credit_request"),
+        ("The figure is $1.2mm.", "credit_request"),
+        ("We are thinking 950k.", "credit_request"),
+        ("The request is for one million dollars.", "credit_request"),
+        ("A reduction may solve this.", "credit_request"),
+        ("Can the seller reduce it?", "credit_request"),
     ],
 )
 def test_classify_outbound_text_distinguishes_kinds(text: str, expected: str):
@@ -173,6 +201,10 @@ def test_compose_follow_up_references_number_and_topics(policy: InvestmentPolicy
     assert draft.kind == "follow_up"
     assert "Following up #2" in draft.body
     assert "Phase I report?" in draft.body
+    same = compose_follow_up(opp, list(reversed(reqs)), policy, follow_up_number=2, in_reply_to="<other>")
+    assert same.draft_id == draft.draft_id
+    assert same.subject == draft.subject
+    assert "[DS-" in draft.subject
 
 
 def test_compose_credit_request_always_requires_approval(policy: InvestmentPolicy):
@@ -220,6 +252,26 @@ def test_dispatch_blocks_money_in_information_request(repo: Repo, policy: Invest
 
     events = repo.list_events(opp.opportunity_id)
     assert any(e.type == EventType.OUTBOUND_BLOCKED for e in events)
+
+
+def test_dispatch_screens_every_caller_supplied_kind(repo: Repo, policy: InvestmentPolicy):
+    opp = _make_opp(repo)
+    outbox = RecordingOutbox()
+    mislabeled = OutboundDraft(
+        opportunity_id=opp.opportunity_id,
+        kind="other",
+        to_email="broker@example.com",
+        subject="Re: Inquiry",
+        body="We need to revisit the purchase price.",
+        requires_approval=False,
+    )
+
+    result = dispatch(mislabeled, repo=repo, policy=policy, outbox=outbox)
+    assert result.status == "pending"
+    assert result.kind == "credit_request"
+    assert result.requires_approval is True
+    assert outbox.sent == []
+    assert any(e.type == EventType.OUTBOUND_BLOCKED for e in repo.list_events(opp.opportunity_id))
 
 
 def test_dispatch_holds_pending_when_approval_required(repo: Repo, policy: InvestmentPolicy):
@@ -328,6 +380,119 @@ def test_approve_and_send_raises_on_unknown_draft(repo: Repo, policy: Investment
     outbox = RecordingOutbox()
     with pytest.raises(LookupError, match="No draft"):
         approve_and_send("nonexistent-draft", repo=repo, policy=policy, outbox=outbox)
+
+
+def test_approve_and_send_screens_every_draft_after_human_approval(repo: Repo, policy: InvestmentPolicy):
+    opp = _make_opp(repo)
+    outbox = RecordingOutbox()
+    draft = OutboundDraft(
+        opportunity_id=opp.opportunity_id,
+        kind="other",
+        to_email="broker@example.com",
+        subject="Re: Economics",
+        body="The purchase price needs a reduction.",
+        requires_approval=False,
+        status="pending",
+    )
+    repo.store_draft(draft)
+
+    sent = approve_and_send(draft.draft_id, repo=repo, policy=policy, outbox=outbox)
+    assert sent.status == "sent"
+    assert sent.kind == "credit_request"
+    assert sent.requires_approval is True
+    assert len(outbox.sent) == 1
+
+
+def test_approve_and_send_two_repo_race_delivers_exactly_once(repo: Repo, policy: InvestmentPolicy):
+    opp = _make_opp(repo)
+    other_repo = Repo(repo.db_path)
+    draft = OutboundDraft(
+        opportunity_id=opp.opportunity_id,
+        kind="information_request",
+        to_email="broker@example.com",
+        subject="Re: Roof",
+        body="What is the roof age?",
+    )
+    repo.store_draft(draft)
+
+    class SlowOutbox:
+        def __init__(self) -> None:
+            self.calls = 0
+            self.lock = threading.Lock()
+
+        def send(self, message: OutboundDraft) -> str:
+            with self.lock:
+                self.calls += 1
+            time.sleep(0.05)
+            return f"delivery-{message.draft_id}"
+
+    outbox = SlowOutbox()
+    start = threading.Barrier(2)
+    results: list[OutboundDraft] = []
+    errors: list[BaseException] = []
+    result_lock = threading.Lock()
+
+    def worker(worker_repo: Repo) -> None:
+        try:
+            start.wait()
+            result = approve_and_send(
+                draft.draft_id,
+                repo=worker_repo,
+                policy=policy,
+                outbox=outbox,
+                principal="human:race-test",
+            )
+            with result_lock:
+                results.append(result)
+        except BaseException as exc:  # noqa: BLE001 - thread failures are asserted below
+            with result_lock:
+                errors.append(exc)
+
+    threads = [threading.Thread(target=worker, args=(worker_repo,)) for worker_repo in (repo, other_repo)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+
+    assert outbox.calls == 1
+    assert repo.get_draft(draft.draft_id).status == "sent"
+    assert all(isinstance(error, DraftNotPending) for error in errors)
+    assert len(results) + len(errors) == 2
+    approvals = [e for e in repo.list_events(opp.opportunity_id) if e.type == EventType.HUMAN_APPROVED_DRAFT]
+    assert len(approvals) == 1
+
+
+def test_approve_and_send_failure_restores_approved_for_explicit_retry(
+    repo: Repo, policy: InvestmentPolicy
+):
+    opp = _make_opp(repo)
+    draft = OutboundDraft(
+        opportunity_id=opp.opportunity_id,
+        kind="information_request",
+        to_email="broker@example.com",
+        subject="Re: Roof",
+        body="What is the roof age?",
+    )
+    repo.store_draft(draft)
+
+    class FailingOutbox:
+        def send(self, message: OutboundDraft) -> str:
+            raise OutboxError(f"transport unavailable for {message.draft_id}")
+
+    with pytest.raises(OutboxError, match="transport unavailable"):
+        approve_and_send(draft.draft_id, repo=repo, policy=policy, outbox=FailingOutbox())
+
+    assert repo.get_draft(draft.draft_id).status == "approved"
+    notes = [event for event in repo.list_events(opp.opportunity_id) if event.type == EventType.NOTE]
+    assert len(notes) == 1
+    assert "transport unavailable" in notes[0].payload["error"]
+
+    retry_outbox = RecordingOutbox()
+    sent = approve_and_send(draft.draft_id, repo=repo, policy=policy, outbox=retry_outbox)
+    assert sent.status == "sent"
+    assert len(retry_outbox.sent) == 1
+    approvals = [e for e in repo.list_events(opp.opportunity_id) if e.type == EventType.HUMAN_APPROVED_DRAFT]
+    assert len(approvals) == 1
 
 
 # --------------------------------------------------------------------------- match_answers & apply_answers
@@ -478,6 +643,139 @@ def test_run_follow_ups_cadence_batching_stall_and_idempotence(repo: Repo, polic
     assert len(notifier.sent) == 1
 
 
+def test_run_follow_ups_two_repo_race_sends_exactly_one(repo: Repo, policy: InvestmentPolicy):
+    opp = _make_opp(repo)
+    other_repo = Repo(repo.db_path)
+    base_time = datetime(2026, 6, 1, 12, 0, tzinfo=UTC)
+    request = DiligenceRequest(
+        opportunity_id=opp.opportunity_id,
+        topic="Roof",
+        question="What is the roof age?",
+        status="sent",
+        sent_at=base_time,
+        due_at=base_time + timedelta(days=3),
+    )
+    repo.store_diligence_request(request)
+
+    class BlockingOutbox:
+        def __init__(self) -> None:
+            self.calls = 0
+            self.entered = threading.Event()
+            self.release = threading.Event()
+
+        def send(self, message: OutboundDraft) -> str:
+            self.calls += 1
+            self.entered.set()
+            assert self.release.wait(timeout=2)
+            return f"sent-{message.draft_id}"
+
+    outbox = BlockingOutbox()
+    notifier = RecordingNotifier()
+    as_of = base_time + timedelta(days=4)
+    reports = []
+
+    def first_tick() -> None:
+        reports.append(
+            run_follow_ups(
+                repo=repo,
+                policy=policy,
+                outbox=outbox,
+                notifier=notifier,
+                as_of=as_of,
+            )
+        )
+
+    thread = threading.Thread(target=first_tick)
+    thread.start()
+    assert outbox.entered.wait(timeout=2)
+    reports.append(
+        run_follow_ups(
+            repo=other_repo,
+            policy=policy,
+            outbox=outbox,
+            notifier=notifier,
+            as_of=as_of,
+        )
+    )
+    outbox.release.set()
+    thread.join(timeout=2)
+
+    assert not thread.is_alive()
+    assert outbox.calls == 1
+    assert sum(report.follow_ups_sent for report in reports) == 1
+    assert repo.get_diligence_request(request.request_id).follow_up_count == 1
+
+
+def test_run_follow_ups_skips_request_answered_between_snapshot_and_reservation(
+    repo: Repo, policy: InvestmentPolicy, monkeypatch
+):
+    opp = _make_opp(repo)
+    base_time = datetime(2026, 6, 1, 12, 0, tzinfo=UTC)
+    request = DiligenceRequest(
+        opportunity_id=opp.opportunity_id,
+        topic="Roof",
+        question="What is the roof age?",
+        status="sent",
+        sent_at=base_time,
+        due_at=base_time + timedelta(days=3),
+    )
+    repo.store_diligence_request(request)
+    real_reserve = repo.reserve_follow_up
+
+    def answer_then_reserve(request_id: str, expected_count: int, as_of: datetime) -> bool:
+        current = repo.get_diligence_request(request_id)
+        repo.update_diligence_request(current.model_copy(update={"status": "answered", "due_at": None}))
+        return real_reserve(request_id, expected_count, as_of)
+
+    monkeypatch.setattr(repo, "reserve_follow_up", answer_then_reserve)
+    outbox = RecordingOutbox()
+    report = run_follow_ups(
+        repo=repo,
+        policy=policy,
+        outbox=outbox,
+        notifier=RecordingNotifier(),
+        as_of=base_time + timedelta(days=4),
+    )
+
+    assert report.follow_ups_sent == 0
+    assert outbox.sent == []
+    assert repo.get_diligence_request(request.request_id).status == "answered"
+
+
+def test_run_follow_ups_transport_failure_rolls_back_reservation(repo: Repo, policy: InvestmentPolicy):
+    opp = _make_opp(repo)
+    base_time = datetime(2026, 6, 1, 12, 0, tzinfo=UTC)
+    request = DiligenceRequest(
+        opportunity_id=opp.opportunity_id,
+        topic="Roof",
+        question="What is the roof age?",
+        status="sent",
+        sent_at=base_time,
+        due_at=base_time + timedelta(days=3),
+    )
+    repo.store_diligence_request(request)
+
+    class FailingOutbox:
+        def send(self, message: OutboundDraft) -> str:
+            raise OutboxError(f"failed {message.draft_id}")
+
+    report = run_follow_ups(
+        repo=repo,
+        policy=policy,
+        outbox=FailingOutbox(),
+        notifier=RecordingNotifier(),
+        as_of=base_time + timedelta(days=4),
+    )
+    restored = repo.get_diligence_request(request.request_id)
+    assert report.follow_ups_sent == 0
+    assert restored.follow_up_count == 0
+    assert restored.last_follow_up_at is None
+    assert restored.due_at == request.due_at
+    notes = [event for event in repo.list_events(opp.opportunity_id) if event.type == EventType.NOTE]
+    assert len(notes) == 1
+    assert "failed" in notes[0].payload["error"]
+
+
 # --------------------------------------------------------------------------- FileOutbox
 
 
@@ -505,7 +803,14 @@ def test_file_outbox_writes_valid_rfc822_eml(tmp_path, policy: InvestmentPolicy)
     assert msg["In-Reply-To"] == "<orig-123@brokerage.example>"
     assert msg["References"] == "<orig-123@brokerage.example>"
     assert msg["Date"] is not None
+    first_message_id = msg["Message-ID"]
+    assert first_message_id is not None
     assert "Could you clarify the roof age?" in msg.get_content()
+
+    retry_path = outbox.send(draft)
+    with open(retry_path, "rb") as retry_file:
+        retry = BytesParser(policy=email.policy.default).parse(retry_file)
+    assert retry["Message-ID"] == first_message_id
 
 
 def test_file_outbox_raises_when_no_recipient(tmp_path, policy: InvestmentPolicy):

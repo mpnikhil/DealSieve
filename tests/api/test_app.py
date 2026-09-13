@@ -12,15 +12,18 @@ from __future__ import annotations
 
 import json
 from decimal import Decimal
+from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
 
 from dealsieve.api.app import create_app
 from dealsieve.notifications import RecordingNotifier
+from dealsieve.outbound import RecordingOutbox
 from dealsieve.schemas import (
     Actor,
     Channel,
+    DocumentAnalysis,
     EventType,
     Notification,
     Opportunity,
@@ -37,9 +40,10 @@ def notifier() -> RecordingNotifier:
 
 
 @pytest.fixture
-def client(repo, policy, notifier) -> TestClient:
-    app = create_app(repo=repo, policy=policy, notifier=notifier)
-    return TestClient(app)
+def client(repo, policy, notifier, monkeypatch) -> TestClient:
+    monkeypatch.delenv("DEALSIEVE_APPROVER_TOKEN", raising=False)
+    app = create_app(repo=repo, policy=policy, notifier=notifier, outbox=RecordingOutbox())
+    return TestClient(app, client=("127.0.0.1", 50000))
 
 
 def _make_opportunity(
@@ -203,6 +207,7 @@ def test_draft_approve_records_event_and_sends(client: TestClient, repo) -> None
     assert len(approved_events) == 1
     assert approved_events[0].actor == Actor.HUMAN
     assert approved_events[0].payload["draft_id"] == draft.draft_id
+    assert approved_events[0].payload["principal"] == "human:local"
 
     # With Phase 2 diligence, approval dispatches via outbox and records BROKER_MESSAGE_SENT.
     sent_events = [e for e in events if e.type == EventType.BROKER_MESSAGE_SENT]
@@ -228,11 +233,72 @@ def test_draft_reject_records_event(client: TestClient, repo) -> None:
     rejected_events = [e for e in events if e.type == EventType.HUMAN_REJECTED_DRAFT]
     assert len(rejected_events) == 1
     assert rejected_events[0].actor == Actor.HUMAN
+    assert rejected_events[0].payload["principal"] == "human:local"
 
 
 def test_draft_approve_404_for_unknown_draft(client: TestClient) -> None:
     r = client.post("/api/drafts/does-not-exist/approve")
     assert r.status_code == 404
+
+
+@pytest.mark.parametrize(
+    ("path", "body"),
+    [
+        ("/api/drafts/anything/approve", None),
+        ("/api/drafts/anything/reject", None),
+        ("/api/diligence/tick", {"as_of": None}),
+    ],
+)
+def test_human_routes_reject_non_loopback_without_token(repo, policy, notifier, path, body) -> None:
+    app = create_app(repo=repo, policy=policy, notifier=notifier, outbox=RecordingOutbox())
+    external = TestClient(app, client=("203.0.113.8", 50000))
+    response = external.post(path, json=body) if body is not None else external.post(path)
+    assert response.status_code == 403
+
+
+def test_approver_token_mode_requires_header_and_records_principal(
+    repo, policy, notifier, monkeypatch
+) -> None:
+    monkeypatch.setenv("DEALSIEVE_APPROVER_TOKEN", "correct horse battery staple")
+    opp = _make_opportunity(repo, status=OpportunityStatus.REVIEW)
+    draft = OutboundDraft(
+        opportunity_id=opp.opportunity_id,
+        to_email="broker@example.com",
+        subject="Re: Questions",
+        body="What is the roof age?",
+    )
+    repo.store_draft(draft)
+    app = create_app(repo=repo, policy=policy, notifier=notifier, outbox=RecordingOutbox())
+    external = TestClient(app, client=("203.0.113.8", 50000))
+
+    assert external.post(f"/api/drafts/{draft.draft_id}/approve").status_code == 401
+    assert (
+        external.post(
+            f"/api/drafts/{draft.draft_id}/approve",
+            headers={"X-DealSieve-Approver": "wrong"},
+        ).status_code
+        == 401
+    )
+    approved = external.post(
+        f"/api/drafts/{draft.draft_id}/approve",
+        headers={"X-DealSieve-Approver": "correct horse battery staple"},
+    )
+    assert approved.status_code == 200
+    event = next(e for e in repo.list_events(opp.opportunity_id) if e.type == EventType.HUMAN_APPROVED_DRAFT)
+    assert event.payload["principal"] == "human:token"
+
+
+def test_approver_token_mode_protects_tick(repo, policy, notifier, monkeypatch) -> None:
+    monkeypatch.setenv("DEALSIEVE_APPROVER_TOKEN", "secret")
+    app = create_app(repo=repo, policy=policy, notifier=notifier, outbox=RecordingOutbox())
+    external = TestClient(app, client=("203.0.113.8", 50000))
+    assert external.post("/api/diligence/tick", json={"as_of": None}).status_code == 401
+    accepted = external.post(
+        "/api/diligence/tick",
+        json={"as_of": None},
+        headers={"X-DealSieve-Approver": "secret"},
+    )
+    assert accepted.status_code == 200
 
 
 def test_list_drafts_filters_by_status(client: TestClient, repo) -> None:
@@ -267,6 +333,69 @@ def test_list_notifications(client: TestClient, repo) -> None:
     assert r.status_code == 200
     ids = [n["notification_id"] for n in r.json()]
     assert note.notification_id in ids
+
+
+# --------------------------------------------------------------------------------------- document images
+
+
+def _store_analysis_with_image(repo, opp: Opportunity, image_path: Path) -> DocumentAnalysis:
+    analysis = DocumentAnalysis(
+        opportunity_id=opp.opportunity_id,
+        message_id="image-message",
+        filename="condition-report.pdf",
+        document_type="inspection_report",
+        summary="Condition report",
+        image_paths=[str(image_path)],
+    )
+    repo.store_document_analysis(analysis)
+    return analysis
+
+
+def test_document_image_serves_regular_file_within_docs_root(
+    client: TestClient, repo, tmp_path, monkeypatch
+) -> None:
+    docs_root = tmp_path / "documents"
+    image_path = docs_root / "abc" / "img_1.png"
+    image_path.parent.mkdir(parents=True)
+    image_path.write_bytes(b"\x89PNG\r\ncontained")
+    monkeypatch.setenv("DEALSIEVE_DOCS_DIR", str(docs_root))
+    opp = _make_opportunity(repo, status=OpportunityStatus.REVIEW)
+    analysis = _store_analysis_with_image(repo, opp, image_path)
+
+    response = client.get(f"/api/documents/{analysis.analysis_id}/images/1")
+    assert response.status_code == 200
+    assert response.content == b"\x89PNG\r\ncontained"
+    assert response.headers["content-type"] == "image/png"
+
+
+def test_document_image_rejects_absolute_path_outside_docs_root(
+    client: TestClient, repo, tmp_path, monkeypatch
+) -> None:
+    docs_root = tmp_path / "documents"
+    docs_root.mkdir()
+    outside = tmp_path / "outside.png"
+    outside.write_bytes(b"outside")
+    monkeypatch.setenv("DEALSIEVE_DOCS_DIR", str(docs_root))
+    opp = _make_opportunity(repo, status=OpportunityStatus.REVIEW)
+    analysis = _store_analysis_with_image(repo, opp, outside)
+
+    assert client.get(f"/api/documents/{analysis.analysis_id}/images/1").status_code == 404
+
+
+def test_document_image_rejects_symlink_inside_root_pointing_outside(
+    client: TestClient, repo, tmp_path, monkeypatch
+) -> None:
+    docs_root = tmp_path / "documents"
+    docs_root.mkdir()
+    outside = tmp_path / "outside.png"
+    outside.write_bytes(b"outside")
+    linked = docs_root / "linked.png"
+    linked.symlink_to(outside)
+    monkeypatch.setenv("DEALSIEVE_DOCS_DIR", str(docs_root))
+    opp = _make_opportunity(repo, status=OpportunityStatus.REVIEW)
+    analysis = _store_analysis_with_image(repo, opp, linked)
+
+    assert client.get(f"/api/documents/{analysis.analysis_id}/images/1").status_code == 404
 
 
 # --------------------------------------------------------------------------------------- ingestion: validation only

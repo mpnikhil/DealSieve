@@ -11,6 +11,7 @@ import os
 import smtplib
 from email.message import EmailMessage
 from email.utils import format_datetime
+from hashlib import sha256
 from pathlib import Path
 from typing import Protocol
 
@@ -51,6 +52,10 @@ def _email_message(draft: OutboundDraft, policy: InvestmentPolicy) -> EmailMessa
     email["To"] = draft.to_email
     email["Subject"] = draft.subject
     email["Date"] = format_datetime(now_utc())
+    # Retries of the same persisted draft must present the same transport identity. SMTP
+    # providers can then deduplicate a retry rather than treating it as a distinct email.
+    digest = sha256(draft.draft_id.encode("utf-8")).hexdigest()
+    email["Message-ID"] = f"<dealsieve.{digest}@local>"
     if draft.in_reply_to_message_id:
         reference = draft.in_reply_to_message_id.strip()
         email["In-Reply-To"] = reference

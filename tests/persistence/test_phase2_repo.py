@@ -19,6 +19,7 @@ from dealsieve.schemas import (
     Notification,
     Opportunity,
     OpportunityEvent,
+    OutboundDraft,
     Property,
     RequestAnswer,
 )
@@ -215,6 +216,45 @@ def test_update_notification_persists_delivered_flag(repo):
 
 
 # --------------------------------------------------------------------------- diligence_requests
+
+
+def test_transition_draft_is_atomic_compare_and_swap(repo):
+    opp = _opportunity(repo)
+    draft = OutboundDraft(
+        opportunity_id=opp.opportunity_id,
+        to_email="broker@example.com",
+        subject="Questions",
+        body="What is the roof age?",
+    )
+    repo.store_draft(draft)
+
+    assert repo.transition_draft(draft.draft_id, "pending", "approved") is True
+    assert repo.transition_draft(draft.draft_id, "pending", "approved") is False
+    assert repo.get_draft(draft.draft_id).status == "approved"
+    assert repo.transition_draft(draft.draft_id, "approved", "sending") is True
+    # The internal sending lease never leaks an invalid status through the shared schema.
+    assert repo.get_draft(draft.draft_id).status == "approved"
+    assert repo.transition_draft(draft.draft_id, "sending", "approved") is True
+
+
+def test_reserve_follow_up_checks_status_count_and_due_date(repo):
+    opp = _opportunity(repo)
+    due = datetime(2026, 9, 12, 9, 0, tzinfo=UTC)
+    request = DiligenceRequest(
+        opportunity_id=opp.opportunity_id,
+        topic="Roof age",
+        question="How old is the roof?",
+        status="sent",
+        due_at=due,
+    )
+    repo.store_diligence_request(request)
+
+    assert repo.reserve_follow_up(request.request_id, 0, due - timedelta(seconds=1)) is False
+    assert repo.reserve_follow_up(request.request_id, 0, due) is True
+    assert repo.reserve_follow_up(request.request_id, 0, due) is False
+    stored = repo.get_diligence_request(request.request_id)
+    assert stored.follow_up_count == 1
+    assert stored.last_follow_up_at == due
 
 
 def test_diligence_request_round_trip_update_and_get(repo):

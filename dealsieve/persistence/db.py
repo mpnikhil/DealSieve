@@ -142,6 +142,10 @@ CREATE TABLE IF NOT EXISTS diligence_requests (
     status          TEXT NOT NULL,
     topic           TEXT NOT NULL,
     created_at      TEXT NOT NULL,
+    follow_up_count INTEGER NOT NULL DEFAULT 0,
+    due_at          TEXT,
+    last_follow_up_at TEXT,
+    follow_up_reserved_at TEXT,
     json            TEXT NOT NULL
 );
 
@@ -192,10 +196,25 @@ def init_schema(conn: sqlite3.Connection) -> None:
     _ensure_column(conn, "inbound_messages", "error", "TEXT")
     _ensure_column(conn, "inbound_messages", "updated_at", "TEXT")
     _ensure_column(conn, "notifications", "dedupe_key", "TEXT")
+    _ensure_column(conn, "diligence_requests", "follow_up_count", "INTEGER NOT NULL DEFAULT 0")
+    _ensure_column(conn, "diligence_requests", "due_at", "TEXT")
+    _ensure_column(conn, "diligence_requests", "last_follow_up_at", "TEXT")
+    _ensure_column(conn, "diligence_requests", "follow_up_reserved_at", "TEXT")
     # These indexes must be created after the column migrations.  Creating them in SCHEMA would
     # make initialization of a pre-Phase-2 database fail before `_ensure_column` can run.
     conn.execute("CREATE INDEX IF NOT EXISTS idx_inbound_messages_status ON inbound_messages(status)")
     # Nullable UNIQUE: SQLite treats every NULL as distinct, so legacy notifications without a
     # dedupe key remain valid while any non-null key stays unique.
     conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_notifications_dedupe_key ON notifications(dedupe_key)")
+    # Backfill scalar cadence fields for rows created by the original Phase-2 schema. These
+    # columns make follow-up reservation a real SQL compare-and-swap rather than a JSON
+    # read/modify/write race.
+    conn.execute(
+        """
+        UPDATE diligence_requests
+           SET follow_up_count = COALESCE(json_extract(json, '$.follow_up_count'), 0),
+               due_at = json_extract(json, '$.due_at'),
+               last_follow_up_at = json_extract(json, '$.last_follow_up_at')
+        """
+    )
     conn.commit()

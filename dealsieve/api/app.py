@@ -1,5 +1,10 @@
 """FastAPI surface for DealSieve. Routes and payload shapes per docs/CONTRACTS.md.
 
+Human mutation routes have two approver modes. When ``DEALSIEVE_APPROVER_TOKEN`` is
+set, clients must send the same value in ``X-DealSieve-Approver`` and events record
+``human:token``. When it is unset, only clients at ``127.0.0.1`` or ``::1`` are
+accepted and events record ``human:local``.
+
 `create_app(repo=None, policy=None, notifier=None)` builds the app; omitted dependencies are constructed
 lazily (on first request) from the environment (DEALSIEVE_DB_PATH, DEALSIEVE_POLICY_PATH, DEALSIEVE_NOTIFIER,
 ...). Building lazily keeps `import dealsieve.api.app` safe even while W1/W2/W3 stubs still raise
@@ -12,6 +17,7 @@ a `TypeAdapter` for lists of them) so `Money`/`Rate` fields serialize as plain n
 
 from __future__ import annotations
 
+import hmac
 import os
 from decimal import Decimal
 from pathlib import Path
@@ -131,6 +137,21 @@ class FollowUpTickBody(BaseModel):
     as_of: str | None = None
 
 
+def require_human(request: Request) -> str:
+    """Authenticate a human approver and return the auditable principal label."""
+    configured = os.environ.get("DEALSIEVE_APPROVER_TOKEN")
+    if configured is not None:
+        supplied = request.headers.get("X-DealSieve-Approver")
+        if supplied is None or not hmac.compare_digest(supplied, configured):
+            raise HTTPException(status_code=401, detail="Valid approver token required")
+        return "human:token"
+
+    client_host = request.client.host if request.client is not None else None
+    if client_host not in {"127.0.0.1", "::1"}:
+        raise HTTPException(status_code=403, detail="Approver action is limited to loopback clients")
+    return "human:local"
+
+
 def create_app(
     *,
     repo: Repo | None = None,
@@ -216,11 +237,15 @@ def create_app(
     def list_drafts(status: str | None = Query(default=None), repo: Repo = Depends(get_repo)) -> Response:  # noqa: B008
         return _json_list(_draft_adapter, list(repo.list_drafts(status=status)))
 
-    def _decide_draft(draft_id: str, *, approve: bool, repo: Repo) -> OutboundDraft:
+    def _decide_draft(draft_id: str, *, approve: bool, repo: Repo, principal: str) -> OutboundDraft:
         draft = repo.get_draft(draft_id)
         if draft is None:
             raise HTTPException(status_code=404, detail=f"No draft {draft_id!r}")
         new_status: Literal["approved", "rejected"] = "approved" if approve else "rejected"
+        if not repo.transition_draft(draft_id, "pending", new_status):
+            current = repo.get_draft(draft_id)
+            current_status = current.status if current is not None else "missing"
+            raise HTTPException(status_code=409, detail=f"Draft {draft_id} is {current_status}; expected pending")
         updated = draft.model_copy(update={"status": new_status, "decided_at": now_utc()})
         repo.update_draft(updated)
         event = OpportunityEvent(
@@ -229,7 +254,7 @@ def create_app(
             actor=Actor.HUMAN,
             summary=f"Human {'approved' if approve else 'rejected'} broker draft {draft.draft_id}"
             + (f" to {draft.to_email}" if draft.to_email else ""),
-            payload={"draft_id": draft.draft_id},
+            payload={"draft_id": draft.draft_id, "principal": principal},
         )
         repo.append_event(event)
         return updated
@@ -237,6 +262,7 @@ def create_app(
     @app.post("/api/drafts/{draft_id}/approve")
     def approve_draft(
         draft_id: str,
+        principal: str = Depends(require_human),  # noqa: B008
         repo: Repo = Depends(get_repo),  # noqa: B008
         policy: InvestmentPolicy = Depends(get_policy),  # noqa: B008
         outbox: Outbox = Depends(get_outbox_dep),  # noqa: B008
@@ -244,15 +270,27 @@ def create_app(
         from dealsieve.diligence import approve_and_send
 
         try:
-            return _json(approve_and_send(draft_id, repo=repo, policy=policy, outbox=outbox))
+            return _json(
+                approve_and_send(
+                    draft_id,
+                    repo=repo,
+                    policy=policy,
+                    outbox=outbox,
+                    principal=principal,
+                )
+            )
         except LookupError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
         except ValueError as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
 
     @app.post("/api/drafts/{draft_id}/reject")
-    def reject_draft(draft_id: str, repo: Repo = Depends(get_repo)) -> Response:  # noqa: B008
-        return _json(_decide_draft(draft_id, approve=False, repo=repo))
+    def reject_draft(
+        draft_id: str,
+        principal: str = Depends(require_human),  # noqa: B008
+        repo: Repo = Depends(get_repo),  # noqa: B008
+    ) -> Response:
+        return _json(_decide_draft(draft_id, approve=False, repo=repo, principal=principal))
 
     # ----------------------------------------------------------------------------------- notifications
 
@@ -273,6 +311,7 @@ def create_app(
     @app.post("/api/diligence/tick")
     def tick_diligence(
         body: FollowUpTickBody,
+        _principal: str = Depends(require_human),  # noqa: B008
         repo: Repo = Depends(get_repo),  # noqa: B008
         policy: InvestmentPolicy = Depends(get_policy),  # noqa: B008
         notifier: Notifier = Depends(get_notifier_dep),  # noqa: B008
@@ -319,8 +358,21 @@ def create_app(
             raise HTTPException(status_code=404, detail=f"No document analysis {analysis_id!r}")
         if index < 1 or index > len(analysis.image_paths):
             raise HTTPException(status_code=404, detail=f"No image {index} for document {analysis_id!r}")
-        image_path = Path(analysis.image_paths[index - 1])
-        if not image_path.is_file():
+        configured_root = Path(os.environ.get("DEALSIEVE_DOCS_DIR", "data/documents"))
+        unresolved_root = configured_root.absolute()
+        docs_root = configured_root.resolve()
+        unresolved = Path(analysis.image_paths[index - 1]).absolute()
+        try:
+            relative = unresolved.relative_to(unresolved_root)
+        except ValueError as exc:
+            raise HTTPException(status_code=404, detail="Stored image is unavailable") from exc
+        cursor = unresolved_root
+        for part in relative.parts:
+            cursor = cursor / part
+            if cursor.is_symlink():
+                raise HTTPException(status_code=404, detail="Stored image is unavailable")
+        image_path = unresolved.resolve()
+        if docs_root not in image_path.parents or not image_path.is_file():
             raise HTTPException(status_code=404, detail="Stored image is unavailable")
         media_type = "image/png" if image_path.suffix.lower() == ".png" else "image/jpeg"
         return Response(image_path.read_bytes(), media_type=media_type)

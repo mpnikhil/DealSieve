@@ -14,6 +14,7 @@ from collections.abc import Iterable
 from dataclasses import asdict, dataclass
 from datetime import datetime, timedelta
 from decimal import Decimal
+from hashlib import sha256
 from typing import Any
 
 from dealsieve.notifications import format_stalled_alert
@@ -34,10 +35,29 @@ from dealsieve.schemas import (
     now_utc,
 )
 
-_OFFER_RE = re.compile(r"\b(?:loi|letter\s+of\s+intent|purchase\s+agreement|our\s+offer)\b", re.I)
-_CREDIT_RE = re.compile(
-    r"(?:\$\s*\d|\b(?:credit|reduce\s+the\s+price|price\s+reduction|would\s+the\s+seller\s+accept|"
-    r"we\s+would\s+pay|discount|concession|terms)\b)",
+_STRONG_OFFER_RE = re.compile(
+    r"\b(?:loi|letter\s+of\s+intent|psa|purchase\s+agreement|bid|proposal)\b",
+    re.I,
+)
+_CONTEXTUAL_OFFER_RE = re.compile(
+    r"\b(?:our\s+offer|make\s+(?:an?\s+)?offer|submit(?:ting)?\s+(?:an?\s+)?offer|offer\s+of)\b",
+    re.I,
+)
+_OFFER_WORD_RE = re.compile(r"\boffer\b", re.I)
+_MONEY_AMOUNT_RE = re.compile(
+    r"(?:"
+    r"\$\s*\d[\d,]*(?:\.\d+)?\s*(?:k|m|mm|bn|thousand|million|billion)?(?![a-z0-9_])"
+    r"|\b\d[\d,]*(?:\.\d+)?\s*(?:k|m|mm|bn|thousand|million|billion|dollars?|usd)\b"
+    r"|\b(?:one|two|three|four|five|six|seven|eight|nine|ten|hundred|thousand|million|billion)"
+    r"(?:[\s-]+(?:one|two|three|four|five|six|seven|eight|nine|ten|hundred|thousand|million|billion))*"
+    r"\s+dollars?\b"
+    r")",
+    re.I,
+)
+_TERMS_RE = re.compile(
+    r"\b(?:purchase\s+price|price|consideration|earnest\s+money|deposit|escrow|contingency|"
+    r"inspection\s+period|closing\s+date|close\s+of\s+escrow|financing|seller\s+carry|terms?|"
+    r"concessions?|credits?|discounts?|reduce|reduction)\b",
     re.I,
 )
 _TOPIC_TOKEN_RE = re.compile(r"[a-z0-9]+")
@@ -58,10 +78,12 @@ _FAMILIES: tuple[frozenset[str], ...] = (
 
 def classify_outbound_text(text: str) -> OutboundKind:
     """Classify text conservatively; offers and money outrank ordinary questions."""
-    if _OFFER_RE.search(text):
+    if _STRONG_OFFER_RE.search(text) or _CONTEXTUAL_OFFER_RE.search(text):
         return "offer"
-    if _CREDIT_RE.search(text):
+    if _MONEY_AMOUNT_RE.search(text) or _TERMS_RE.search(text):
         return "credit_request"
+    if _OFFER_WORD_RE.search(text):
+        return "offer"
     return "information_request"
 
 
@@ -150,11 +172,15 @@ def compose_follow_up(
         f"Following up #{follow_up_number} on the diligence items below for {opp.display_name}:\n\n"
         f"{numbered}\n\n{policy.outreach.signature}"
     )
+    minimum_request_id = min(request.request_id for request in requests)
+    dedupe_source = f"{opp.opportunity_id}:{minimum_request_id}:{follow_up_number}"
+    dedupe_key = sha256(dedupe_source.encode("utf-8")).hexdigest()[:16]
     return OutboundDraft(
+        draft_id=f"drf_fu_{dedupe_key}",
         opportunity_id=opp.opportunity_id,
         kind="follow_up",
         to_email=opp.broker_email,
-        subject=_reply_subject(opp.display_name),
+        subject=f"{_reply_subject(opp.display_name)} [DS-{dedupe_key}]",
         body=body,
         questions=questions,
         request_ids=[request.request_id for request in requests],
@@ -188,14 +214,29 @@ def compose_credit_request(
     )
 
 
-def _event(repo: Repo, draft: OutboundDraft, kind: EventType, actor: Actor, summary: str) -> None:
+def _event(
+    repo: Repo,
+    draft: OutboundDraft,
+    kind: EventType,
+    actor: Actor,
+    summary: str,
+    *,
+    principal: str | None = None,
+) -> None:
+    payload: dict[str, Any] = {
+        "draft_id": draft.draft_id,
+        "kind": draft.kind,
+        "request_ids": draft.request_ids,
+    }
+    if principal is not None:
+        payload["principal"] = principal
     repo.append_event(
         OpportunityEvent(
             opportunity_id=draft.opportunity_id,
             type=kind,
             actor=actor,
             summary=summary,
-            payload={"draft_id": draft.draft_id, "kind": draft.kind, "request_ids": draft.request_ids},
+            payload=payload,
         )
     )
 
@@ -234,10 +275,19 @@ def dispatch(
     """Screen, persist, and either hold or send a newly composed message."""
     combined = "\n".join([draft.body, *draft.questions])
     kind_seen = classify_outbound_text(combined)
-    if draft.kind in ("information_request", "follow_up") and kind_seen != "information_request":
+    if kind_seen in {"credit_request", "offer"}:
         blocked = draft.model_copy(update={"kind": kind_seen, "requires_approval": True, "status": "pending"})
         repo.store_draft(blocked)
-        _event(repo, blocked, EventType.OUTBOUND_BLOCKED, actor, f"Outbound message blocked by policy screen: {kind_seen}")
+        if draft.kind not in {"credit_request", "offer"}:
+            _event(
+                repo,
+                blocked,
+                EventType.OUTBOUND_BLOCKED,
+                actor,
+                f"Outbound message blocked by policy screen: {kind_seen}",
+            )
+        else:
+            _event(repo, blocked, EventType.BROKER_DRAFT_CREATED, actor, f"Broker draft created: {blocked.subject}")
         return blocked
 
     requires_approval = draft.requires_approval or draft.kind in policy.outreach.always_require_approval
@@ -257,26 +307,82 @@ def dispatch(
     return sent
 
 
+class DraftNotPending(ValueError):
+    """Raised when a draft cannot be claimed for an explicit approval/send attempt."""
+
+
 def approve_and_send(
     draft_id: str,
     *,
     repo: Repo,
     policy: InvestmentPolicy,
     outbox: Any,
+    principal: str = "human:explicit",
 ) -> OutboundDraft:
-    """Record explicit approval, deliver, then perform every request/event side effect."""
+    """Atomically claim an explicit approval, deliver once, and apply post-send effects."""
     draft = repo.get_draft(draft_id)
     if draft is None:
         raise LookupError(f"No draft {draft_id!r}")
     if draft.status == "sent":
         return draft
-    if draft.status == "rejected":
-        raise ValueError("a rejected draft cannot be approved and sent")
-    approved_at = now_utc()
-    approved = draft.model_copy(update={"status": "approved", "decided_at": approved_at})
-    repo.update_draft(approved)
-    _event(repo, approved, EventType.HUMAN_APPROVED_DRAFT, Actor.HUMAN, f"Human approved broker draft {draft_id}")
-    delivery_ref = outbox.send(approved)
+    initial_status = draft.status
+    if initial_status not in {"pending", "approved"}:
+        if initial_status == "rejected":
+            raise DraftNotPending("a rejected draft cannot be approved and sent")
+        raise DraftNotPending(f"Draft {draft_id} is {initial_status}; expected pending")
+
+    combined = "\n".join([draft.body, *draft.questions])
+    kind_seen = classify_outbound_text(combined)
+    screened_kind = kind_seen if kind_seen in {"credit_request", "offer"} else draft.kind
+    approved_at = draft.decided_at or now_utc()
+    approved = draft.model_copy(
+        update={
+            "kind": screened_kind,
+            "requires_approval": True,
+            "status": "approved",
+            "decided_at": approved_at,
+        }
+    )
+
+    if initial_status == "pending":
+        if not repo.transition_draft(draft_id, "pending", "approved"):
+            current = repo.get_draft(draft_id)
+            if current is not None and current.status == "sent":
+                return current
+            current_status = current.status if current is not None else "missing"
+            raise DraftNotPending(f"Draft {draft_id} is {current_status}; expected pending")
+        _event(
+            repo,
+            approved,
+            EventType.HUMAN_APPROVED_DRAFT,
+            Actor.HUMAN,
+            f"Human approved broker draft {draft_id}",
+            principal=principal,
+        )
+
+    if not repo.transition_draft(draft_id, "approved", "sending"):
+        current = repo.get_draft(draft_id)
+        if current is not None and current.status == "sent":
+            return current
+        current_status = current.status if current is not None else "missing"
+        raise DraftNotPending(f"Draft {draft_id} is {current_status}; send already claimed")
+
+    try:
+        delivery_ref = outbox.send(approved)
+    except Exception as exc:
+        restored = repo.transition_draft(draft_id, "sending", "approved")
+        if restored:
+            repo.update_draft(approved)
+        repo.append_event(
+            OpportunityEvent(
+                opportunity_id=draft.opportunity_id,
+                type=EventType.NOTE,
+                actor=Actor.SYSTEM,
+                summary=f"Broker draft delivery failed; explicit retry required: {draft.subject}",
+                payload={"draft_id": draft_id, "error": str(exc), "principal": principal},
+            )
+        )
+        raise
     sent_at = now_utc()
     sent = approved.model_copy(update={"status": "sent", "sent_at": sent_at, "delivery_ref": delivery_ref})
     repo.update_draft(sent)
@@ -413,37 +519,92 @@ def run_follow_ups(
         opp = repo.get_opportunity(opportunity_id)
         if opp is None:
             continue
-        if all(request.follow_up_count < policy.outreach.max_follow_ups for request in requests):
-            number = max(request.follow_up_count for request in requests) + 1
+
+        eligible = [
+            request
+            for request in requests
+            if request.follow_up_count < policy.outreach.max_follow_ups
+        ]
+        reserved: list[tuple[DiligenceRequest, DiligenceRequest]] = []
+        for snapshot in eligible:
+            if not repo.reserve_follow_up(snapshot.request_id, snapshot.follow_up_count, tick):
+                continue
+            current = repo.get_diligence_request(snapshot.request_id)
+            if current is not None and current.status == "sent":
+                reserved.append((snapshot, current))
+
+        if reserved:
+            claimed = [current for _, current in reserved]
+            number = max(request.follow_up_count for request in claimed)
             previous = next(
                 (draft for draft in reversed(repo.list_drafts(opportunity_id=opportunity_id)) if draft.status == "sent"),
                 None,
             )
             follow_up = compose_follow_up(
                 opp,
-                requests,
+                claimed,
                 policy,
                 follow_up_number=number,
                 in_reply_to=previous.in_reply_to_message_id if previous else None,
             )
-            sent = dispatch(follow_up, repo=repo, policy=policy, outbox=outbox)
+            try:
+                sent = dispatch(follow_up, repo=repo, policy=policy, outbox=outbox)
+            except Exception as exc:
+                for snapshot, reserved_request in reserved:
+                    current = repo.get_diligence_request(snapshot.request_id)
+                    if (
+                        current is not None
+                        and current.status == "sent"
+                        and current.follow_up_count == reserved_request.follow_up_count
+                        and current.last_follow_up_at == tick
+                    ):
+                        repo.update_diligence_request(snapshot)
+                repo.append_event(
+                    OpportunityEvent(
+                        opportunity_id=opportunity_id,
+                        type=EventType.NOTE,
+                        actor=Actor.SYSTEM,
+                        summary="Diligence follow-up delivery failed; reservations rolled back",
+                        payload={
+                            "draft_id": follow_up.draft_id,
+                            "request_ids": [request.request_id for request in claimed],
+                            "error": str(exc),
+                        },
+                    )
+                )
+                continue
             if sent.status == "sent":
                 report.follow_ups_sent += 1
-                for request in requests:
+                for request in claimed:
                     revised = repo.get_diligence_request(request.request_id) or request
-                    revised = revised.model_copy(
-                        update={
-                            "follow_up_count": request.follow_up_count + 1,
-                            "last_follow_up_at": tick,
-                            "due_at": tick + timedelta(days=policy.outreach.follow_up_after_days),
-                        }
-                    )
-                    repo.update_diligence_request(revised)
-                    report.requests_followed_up.append(revised)
-            continue
+                    if revised.status == "sent":
+                        revised = revised.model_copy(
+                            update={
+                                "due_at": tick + timedelta(days=policy.outreach.follow_up_after_days),
+                            }
+                        )
+                        repo.update_diligence_request(revised)
+                        report.requests_followed_up.append(revised)
+            else:
+                # A policy screen or approval policy held the composed follow-up. It was not
+                # transported, so release every cadence reservation for a later explicit tick.
+                for snapshot, reserved_request in reserved:
+                    current = repo.get_diligence_request(snapshot.request_id)
+                    if (
+                        current is not None
+                        and current.status == "sent"
+                        and current.follow_up_count == reserved_request.follow_up_count
+                        and current.last_follow_up_at == tick
+                    ):
+                        repo.update_diligence_request(snapshot)
 
         stalled_requests: list[DiligenceRequest] = []
         for request in requests:
+            if request.follow_up_count < policy.outreach.max_follow_ups:
+                continue
+            current = repo.get_diligence_request(request.request_id)
+            if current is None or current.status not in {"sent", "overdue"}:
+                continue
             revised = request.model_copy(update={"status": "stalled", "due_at": None})
             repo.update_diligence_request(revised)
             repo.append_event(
@@ -456,6 +617,9 @@ def run_follow_ups(
             )
             stalled_requests.append(revised)
         report.stalled += len(stalled_requests)
+
+        if not stalled_requests:
+            continue
 
         notification = format_stalled_alert(
             opp,
@@ -479,6 +643,7 @@ def run_follow_ups(
 
 
 __all__ = [
+    "DraftNotPending",
     "FollowUpReport",
     "apply_answers",
     "approve_and_send",

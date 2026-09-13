@@ -618,6 +618,29 @@ class Repo:
         self._conn.commit()
 
     @_locked
+    def transition_draft(self, draft_id: str, from_status: str, to_status: str) -> bool:
+        """Atomically compare-and-swap a draft status.
+
+        ``sending`` is an internal reservation state that intentionally is not part of the
+        public ``OutboundDraft`` schema. While a sender owns that reservation, the JSON remains
+        schema-valid as ``approved``; the scalar status column is authoritative for the CAS.
+        """
+
+        def _txn() -> bool:
+            json_status = "approved" if to_status == "sending" else to_status
+            cursor = self._conn.execute(
+                """
+                UPDATE outbound_drafts
+                   SET status = ?, json = json_set(json, '$.status', ?)
+                 WHERE draft_id = ? AND status = ?
+                """,
+                (to_status, json_status, draft_id, from_status),
+            )
+            return cursor.rowcount == 1
+
+        return self._run_immediate(_txn)
+
+    @_locked
     def list_drafts(
         self, status: str | None = None, opportunity_id: str | None = None
     ) -> list[OutboundDraft]:
@@ -691,8 +714,10 @@ class Repo:
     def store_diligence_request(self, request: DiligenceRequest) -> None:
         self._conn.execute(
             """
-            INSERT INTO diligence_requests (request_id, opportunity_id, status, topic, created_at, json)
-            VALUES (?, ?, ?, ?, ?, ?)
+            INSERT INTO diligence_requests
+                (request_id, opportunity_id, status, topic, created_at, follow_up_count,
+                 due_at, last_follow_up_at, follow_up_reserved_at, json)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, ?)
             """,
             (
                 request.request_id,
@@ -700,6 +725,9 @@ class Repo:
                 request.status,
                 request.topic,
                 request.created_at.isoformat(),
+                request.follow_up_count,
+                request.due_at.isoformat() if request.due_at else None,
+                request.last_follow_up_at.isoformat() if request.last_follow_up_at else None,
                 _dump(request),
             ),
         )
@@ -708,10 +736,59 @@ class Repo:
     @_locked
     def update_diligence_request(self, request: DiligenceRequest) -> None:
         self._conn.execute(
-            "UPDATE diligence_requests SET status = ?, topic = ?, json = ? WHERE request_id = ?",
-            (request.status, request.topic, _dump(request), request.request_id),
+            """
+            UPDATE diligence_requests
+               SET status = ?, topic = ?, follow_up_count = ?, due_at = ?,
+                   last_follow_up_at = ?, follow_up_reserved_at = NULL, json = ?
+             WHERE request_id = ?
+            """,
+            (
+                request.status,
+                request.topic,
+                request.follow_up_count,
+                request.due_at.isoformat() if request.due_at else None,
+                request.last_follow_up_at.isoformat() if request.last_follow_up_at else None,
+                _dump(request),
+                request.request_id,
+            ),
         )
         self._conn.commit()
+
+    @_locked
+    def reserve_follow_up(self, request_id: str, expected_count: int, as_of: datetime) -> bool:
+        """Claim one due, unanswered request for a follow-up using a single conditional UPDATE."""
+
+        def _txn() -> bool:
+            as_of_iso = as_of.isoformat()
+            cursor = self._conn.execute(
+                """
+                UPDATE diligence_requests
+                   SET follow_up_count = ?, last_follow_up_at = ?, follow_up_reserved_at = ?,
+                       json = json_set(
+                           json,
+                           '$.follow_up_count', ?,
+                           '$.last_follow_up_at', ?
+                       )
+                 WHERE request_id = ?
+                   AND follow_up_count = ?
+                   AND status = 'sent'
+                   AND due_at <= ?
+                   AND follow_up_reserved_at IS NULL
+                """,
+                (
+                    expected_count + 1,
+                    as_of_iso,
+                    as_of_iso,
+                    expected_count + 1,
+                    as_of_iso,
+                    request_id,
+                    expected_count,
+                    as_of_iso,
+                ),
+            )
+            return cursor.rowcount == 1
+
+        return self._run_immediate(_txn)
 
     @_locked
     def get_diligence_request(self, request_id: str) -> DiligenceRequest | None:
