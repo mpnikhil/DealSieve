@@ -2,7 +2,7 @@
 
 **A persistent acquisition agent that rejects deals, remembers why, computes what would change the decision, and interrupts you when that happens.**
 
-Built with the [Strands Agents SDK](https://strandsagents.com/) for the AWS *Agents for Humans* hackathon (Professional Agents track). Deployed to Bedrock AgentCore Runtime; runs fully offline too. 467 tests.
+Built with the [Strands Agents SDK](https://strandsagents.com/) for the AWS *Agents for Humans* hackathon (Professional Agents track). Deployed to Bedrock AgentCore Runtime; runs fully offline too. 491 tests.
 
 ## The story, with real numbers
 
@@ -137,7 +137,7 @@ The state machine, its invariants and the trace explorer that checks them are in
 ```bash
 make setup            # Python 3.12 venv via uv
 cp .env.example .env
-make test             # 467 deterministic tests, no model calls
+make test             # 491 deterministic tests, no model calls
 make demo-offline     # acts 1 and 2 with the scripted model, ~3 s; ends with the request awaiting approval
 make frontend && PORT=8010 make api   # dashboard at http://localhost:8010
 ```
