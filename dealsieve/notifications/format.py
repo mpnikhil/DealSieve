@@ -313,10 +313,12 @@ def format_stalled_alert(
 ) -> Notification:
     """Build the one-time escalation after the autonomous follow-up budget is exhausted."""
     follow_ups = max((request.follow_up_count for request in requests), default=0)
-    topics = ", ".join(request.topic for request in requests)
+    noun = "request" if len(requests) == 1 else "requests"
+    bullets = "\n".join(f"- {request.topic}" for request in requests)
     body = (
         f"{opportunity.display_name}\n\n"
-        f"No reply on {len(requests)} requests after {follow_ups} follow-ups: {topics}. "
+        f"No reply on {len(requests)} {noun} after {follow_ups} follow-ups:\n"
+        f"{bullets}\n\n"
         "The loop has stopped; your move."
     )
     return Notification(

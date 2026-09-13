@@ -5,6 +5,8 @@ This is what the local/offline demo shows in place of a real Telegram message.
 
 from __future__ import annotations
 
+import textwrap
+
 from dealsieve.schemas import Channel, Notification
 
 
@@ -17,9 +19,24 @@ def _render_lines(notification: Notification) -> list[str]:
     return lines
 
 
+BOX_WRAP_WIDTH = 96
+
+
+def _wrap(lines: list[str], width: int = BOX_WRAP_WIDTH) -> list[str]:
+    """Word-wrap long lines so the box fits a normal terminal; short lines pass through unchanged."""
+    out: list[str] = []
+    for line in lines:
+        if len(line) <= width:
+            out.append(line)
+            continue
+        indent = "  " if line.startswith("- ") else ""
+        out.extend(textwrap.wrap(line, width=width, subsequent_indent=indent, break_long_words=False) or [""])
+    return out
+
+
 def render_box(notification: Notification) -> str:
     """Return the bordered box as a single string (also used by tests)."""
-    lines = _render_lines(notification)
+    lines = _wrap(_render_lines(notification))
     width = max((len(line) for line in lines), default=0)
     border = "+" + "-" * (width + 2) + "+"
     body_lines = [f"| {line.ljust(width)} |" for line in lines]
