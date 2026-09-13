@@ -180,6 +180,18 @@ Full-resolution rendering: [`architecture/architecture.png`](architecture/archit
 | Immutable policy | Thresholds: min cap, min DSCR, max LTV, tenant concentration, capital available | `config/investment_policy.yaml` | Nobody at runtime — agents may read it, never write it; every run records the `policy_version` it was evaluated under |
 | Human irreversible decisions | Approve/reject a broker draft; the only thing that can send an outbound message | Dashboard / Telegram callback | Only a human, explicitly, per draft |
 
+## Trust boundaries in the diligence loop
+
+The loop sends email on your behalf and reads documents a stranger attached, so every step that could be abused is gated in code, not in a prompt:
+
+- **Human approval is a real gate.** `POST /api/drafts/{id}/approve`, `/reject` and `/api/diligence/tick` accept only loopback clients by default; set `DEALSIEVE_APPROVER_TOKEN` and the dashboard (or Telegram bot) must present it in `X-DealSieve-Approver`. The approving principal is recorded on the `HUMAN_APPROVED_DRAFT` event. Approval is a compare-and-set transition with a stable Message-ID per draft, so a double click or a retried request can never send twice.
+- **Money never leaves without you.** Every outbound message, whatever the agent called it, passes a deterministic screen for price, credit, deposit, contingency, financing, LOI and purchase-agreement language. Anything that trips it is stored as a pending credit request or offer for your approval, and the attempt is logged as `OUTBOUND_BLOCKED`.
+- **Capex is verified, not believed.** Figures the Inspector proposes from a report are accepted only when both ends of the range appear in the document's own text (tolerant of `$85,000`, `85,000`, `85000`, `$85k`, en dashes and odd spaces). Rejected proposals are recorded on the deal and never touch underwriting. Immediate capex is recomputed from the union of verified items across every analysis of the property, deduplicated by item, with disagreements written to the deal's conflicts.
+- **Diligence questions come from the skeptic, not the email.** The agent's requested items are reconciled against the skeptic's own questions; unmatched items are dropped, so text in a broker email or PDF cannot steer what gets asked. Credit requests are only drafted after a real threshold loss or a same-message change.
+- **Alerts tell the truth.** A notification is persisted as intent, marked delivered only after the notifier returns, and resumed on the next run if delivery failed. `notified_human` in the outcome means delivered.
+- **Follow-ups cannot run away.** Due requests are reserved atomically before anything is sent, re-checked for answers, and capped by policy; two schedulers ticking at once send one follow-up.
+- **Files stay in their box.** Extracted images are served only from under `DEALSIEVE_DOCS_DIR`, resolved, no symlinks.
+
 ## Quick start
 
 ```bash
@@ -295,7 +307,7 @@ docs/                           DEALSIEVE_PLAN.md, CONTRACTS.md, SUBMISSION.md, 
 make test
 ```
 
-**304 tests pass, 2 deselected** (`@pytest.mark.live` tests that run through real CLIs — excluded by default via `pyproject.toml`'s `addopts`, run explicitly with `make test-live`). Coverage spans gate boundaries, amortization against a known payment table, the property-tax reset, the viability bisection solver, stress scenarios, classification, identity resolution (address fuzzing, reply-thread matching), reconciliation and conflict preservation, the `CLIModel` render/parse cycle against an injected fake runner, the scripted-model replay, tool gating (`notify_human` refuses without a real threshold crossing; `request_diligence` requires REVIEW status; `request_price_adjustment` enforces frontier math), the diligence loop and follow-up engine, the FastAPI surface, and the full multi-act path end to end (`tests/e2e/test_watch_to_review.py` and `tests/e2e/test_diligence_loop.py`).
+**366 tests pass, 2 deselected** (`@pytest.mark.live` tests that run through real CLIs — excluded by default via `pyproject.toml`'s `addopts`, run explicitly with `make test-live`). Coverage spans gate boundaries, amortization against a known payment table, the property-tax reset, the viability bisection solver, stress scenarios, classification, identity resolution (address fuzzing, reply-thread matching), reconciliation and conflict preservation, the `CLIModel` render/parse cycle against an injected fake runner, the scripted-model replay, tool gating (`notify_human` refuses without a real threshold crossing; `request_diligence` requires REVIEW status; `request_price_adjustment` enforces frontier math), the diligence loop and follow-up engine, the FastAPI surface, and the full multi-act path end to end (`tests/e2e/test_watch_to_review.py` and `tests/e2e/test_diligence_loop.py`).
 
 ## Roadmap
 
