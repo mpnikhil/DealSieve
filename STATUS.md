@@ -1,6 +1,6 @@
 # Current Status
 
-Last updated: 2026-09-12 22:40 PDT. Submission deadline: 2026-09-14 17:00 PDT.
+Last updated: 2026-09-13 (morning PDT). Submission deadline: 2026-09-14 17:00 PDT.
 
 ## Completed
 - Phase 1: deterministic underwriting engine, immutable policy, SQLite event store, identity resolution, .eml ingestion, Strands Acquisition and Skeptic agents, `CLIModel` (claude/codex/agy) and `ScriptedModel` providers, FastAPI + React dashboard, console/Telegram notifiers, CLI, AgentCore entrypoint.
@@ -14,12 +14,12 @@ Last updated: 2026-09-12 22:40 PDT. Submission deadline: 2026-09-14 17:00 PDT.
 - Live: acts 1 and 2 through Claude Sonnet, Gemini Flash (agy) and Codex; act 3 through Codex with the three photos attached (12 findings, 3 capex items, REVIEW -> NEAR, credit draft pending).
 
 ## Blockers
-- No AWS credentials on the build machine: Bedrock backend and AgentCore deployment untested (entrypoint verified locally).
+- AgentCore Runtime deployed from another session (see deploys/LEDGER.tsv); the model path waits on a new account's Bedrock tokens-per-day quota (0, auto-lifts). No AWS credentials on this build machine.
 - No Telegram bot token: Telegram delivery and inline approval untested (console notifier and dashboard approval verified).
 
 ## Next Three Tasks
 1. Record the demo video from docs/DEMO_SCRIPT.md (three acts, <= 5:00) and submit on Devpost with docs/SUBMISSION.md.
-2. If AWS credentials arrive: Bedrock smoke test, `agentcore configure && agentcore launch`, add the live link to the submission.
+2. When the Bedrock quota lifts: run the two-email story against the deployed runtime, log the row in deploys/LEDGER.tsv, add the runtime to the submission.
 3. If a Telegram token arrives: run `dealsieve telegram-bot`, approve the information request from the phone, screenshot for the video.
 
 ## Demo Health
@@ -29,4 +29,4 @@ Live act 3 with photos (codex): PASS
 Dashboard against live data: PASS
 Telegram: UNTESTED (no token)
 SES: NOT BUILT (file outbox stands in; SMTP/SES adapters behind the same interface)
-AgentCore: ENTRYPOINT BUILT, NOT DEPLOYED (no credentials)
+AgentCore: DEPLOYED, status path PASS, model path PENDING Bedrock quota

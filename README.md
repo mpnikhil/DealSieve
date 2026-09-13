@@ -253,22 +253,31 @@ Other environment variables (`.env.example`): `DEALSIEVE_DB_PATH` (default `data
 
 ## AgentCore deployment
 
-**Status: deployable, not deployed** — there are no AWS credentials on this build machine yet. The entrypoint (`dealsieve/agentcore_app.py`, a `BedrockAgentCoreApp` wrapping the same `process_inbound` pipeline used everywhere else) is written and locally verified; the steps below are exact but have not been run against real AWS infrastructure.
+**Status: deployed to Amazon Bedrock AgentCore Runtime (us-west-2).** The entrypoint is
+`dealsieve/agentcore_app.py`, a `BedrockAgentCoreApp` wrapping the same `process_inbound` pipeline used everywhere
+else, with the runtime dependencies in `requirements-agentcore.txt`. Every deploy is recorded as an immutable row in
+[`deploys/LEDGER.tsv`](deploys/LEDGER.tsv) via `scripts/log_deploy.sh` (timestamp, runtime ARN, image digest, git
+SHA, Bedrock model, result). The first deploy's `status` invocation works end to end; the email/model path was
+waiting on a new account's Bedrock tokens-per-day quota at the time of writing (0, non-adjustable, lifts
+automatically). Until then, the local `cli` backend and the offline `scripted` backend carry the demo.
 
 Local check (no AWS needed):
 ```bash
 python -m dealsieve.agentcore_app
 curl -X POST localhost:8080/invocations -H "Content-Type: application/json" -d '{"type":"status"}'
 ```
-This returns the same `DashboardStats` JSON the `/api/stats` endpoint serves. Other payload shapes: `{"type":"email","eml_base64":"..."}`, `{"type":"text","text":"...","sender":"..."}`, `{"type":"deal","id":"101"}`.
+Payload shapes: `{"type":"status"}`, `{"type":"email","eml_base64":"..."}`, `{"type":"text","text":"...","sender":"..."}`,
+`{"type":"deal","id":"101"}`.
 
-To deploy for real, once AWS credentials are configured:
+To deploy (or redeploy) with AWS credentials configured:
 ```bash
 uv pip install bedrock-agentcore-starter-toolkit   # provides the `agentcore` CLI
-agentcore configure --entrypoint dealsieve/agentcore_app.py
+agentcore configure --entrypoint dealsieve/agentcore_app.py --requirements-file requirements-agentcore.txt
 agentcore launch
+scripts/log_deploy.sh agentcore-runtime <runtime-arn> <image-digest> global.anthropic.claude-sonnet-4-6 ok "notes"
 ```
-`agentcore configure` builds the container image and IAM role for the entrypoint above; `agentcore launch` deploys it to an AgentCore Runtime endpoint. Set `DEALSIEVE_MODEL_BACKEND=bedrock` (plus `AWS_REGION`) in the runtime's environment so the deployed agent uses `BedrockModel` instead of a local CLI.
+Set `DEALSIEVE_MODEL_BACKEND=bedrock` (plus `AWS_REGION`) in the runtime's environment so the deployed agent uses
+`BedrockModel` instead of a local CLI.
 
 ## Repository layout
 
