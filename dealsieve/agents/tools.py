@@ -57,6 +57,7 @@ from dealsieve.schemas import (
     Evidence,
     ExtractedClaims,
     InboundMessage,
+    MemoryHit,
     Notification,
     Opportunity,
     OpportunityEvent,
@@ -70,6 +71,7 @@ from dealsieve.schemas import (
 from dealsieve.underwriting import run_underwriting
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
+    from dealsieve.memory import MemoryStore
     from dealsieve.notifications import Notifier
     from dealsieve.outbound import Outbox
     from dealsieve.persistence import Repo
@@ -154,6 +156,11 @@ class ProcessingSession:
 
     #: Where approved broker mail actually goes. `None` until the pipeline supplies one.
     outbox: Outbox | None = None
+
+    #: What DealSieve remembers about this investor and this broker. The agents only ever *read* it
+    #: (`recall_memories`); the writes are the diligence hooks on approve/reject/answer/stall.
+    #: `None` -- the default, and every pre-Phase-3 caller -- means "recall nothing".
+    memory: MemoryStore | None = None
 
     # -- mutable state -----------------------------------------------------
     opportunity_id: str | None = None
@@ -1315,6 +1322,127 @@ def perform_underwrite(session: ProcessingSession, *, actor: Actor = Actor.AGENT
     return result
 
 
+# --------------------------------------------------------------------------- decision memory
+
+#: How relevant a recalled hit has to be before it is allowed to change what a human reads. The
+#: skeptic's prompt gets everything `recall_for_deal` returns; a sentence in a credit rationale or
+#: an alert is a stronger claim ("you did this before"), so it needs a stronger match.
+MEMORY_STRONG_SCORE = 0.6
+
+#: At most this many recalled lines reach the skeptic's prompt.
+MEMORY_PROMPT_LINES = 5
+
+_MEMORY_AMOUNT_RE = re.compile(r"\$\s*([\d,]+(?:\.\d+)?)")
+
+#: What makes a remembered decision a decision about *money* -- the only kind the credit rationale
+#: is allowed to cite. A remembered information request is not a precedent for a price ask.
+_MEMORY_MONEY_WORDS = ("credit", "price", "ask", "offer", "discount", "concession")
+
+
+def open_diligence_topics(session: ProcessingSession) -> list[str]:
+    """The topics still waiting on the broker, oldest first, each listed once."""
+    if session.opportunity_id is None:
+        return []
+    try:
+        requests = session.repo.list_diligence_requests(opportunity_id=session.opportunity_id)
+    except Exception:  # pragma: no cover - a repo that cannot list costs context, nothing more
+        logger.exception("could not list diligence requests for %s", session.opportunity_id)
+        return []
+    return list(dict.fromkeys(r.topic for r in requests if r.status in OPEN_REQUEST_STATUSES))
+
+
+def recall_memories(session: ProcessingSession, opp: Opportunity | None = None) -> list[MemoryHit]:
+    """What DealSieve remembers that bears on this deal: this investor's past decisions, and this
+    broker's record.
+
+    Memory is an enrichment, never a dependency. No store, no property, an AgentCore blip or a
+    repository that predates the `memory_events` table all mean "no hits", and the deal is then
+    processed exactly as it was before Phase 3 -- nothing here is allowed to break the pipeline.
+
+    `recall_for_deal` composes the query from the property type, the city and the topics, so the
+    open diligence topics are all this has to supply.
+    """
+    if session.memory is None:
+        return []
+    opp = opp or session.opportunity()
+    if opp is None:
+        return []
+    try:
+        from dealsieve.memory import recall_for_deal
+
+        prop = session.repo.get_property(opp.property_id)
+        if prop is None:
+            return []
+        return recall_for_deal(
+            session.memory,
+            opp,
+            prop,
+            topics=open_diligence_topics(session),
+            broker_email=opp.broker_email,
+        )
+    except Exception as exc:  # noqa: BLE001 -- deliberately broad: memory never breaks the pipeline
+        logger.warning(
+            "decision memory recall failed for %s; continuing without it: %s", opp.opportunity_id, exc
+        )
+        return []
+
+
+def _memory_amount(hit: MemoryHit) -> str | None:
+    """The dollar figure this memory actually carries -- and never one it does not."""
+    raw = hit.payload.get("amount")
+    if raw is not None:
+        try:
+            return f"${Decimal(str(raw)):,.0f}"
+        except (ArithmeticError, ValueError):
+            pass
+    match = _MEMORY_AMOUNT_RE.search(hit.text)
+    if match is None:
+        return None
+    try:
+        return f"${Decimal(match.group(1).replace(',', '')):,.0f}"
+    except (ArithmeticError, ValueError):  # pragma: no cover - the regex only matches digits
+        return None
+
+
+def _memory_outcome(hit: MemoryHit) -> str | None:
+    """"approved" / "rejected", from the payload the hook wrote or the sentence it composed."""
+    outcome = str(hit.payload.get("outcome", "")).strip().lower()
+    if outcome in ("approved", "rejected"):
+        return outcome
+    lowered = hit.text.strip().lower()
+    if lowered.startswith("approved"):
+        return "approved"
+    if lowered.startswith("rejected"):
+        return "rejected"
+    return None
+
+
+def credit_memory_note(memories: list[MemoryHit]) -> str | None:
+    """One sentence recalling what this investor did last time a price ask like this came up.
+
+    Only a strong (`>= MEMORY_STRONG_SCORE`) *decision* about money qualifies, and every figure in
+    the sentence is read out of the remembered event -- its payload, else its own text. A memory
+    that carries no amount produces no sentence rather than an invented one.
+    """
+    for hit in memories:
+        if hit.kind != "decision" or hit.score < MEMORY_STRONG_SCORE:
+            continue
+        lowered = hit.text.lower()
+        draft_kind = str(hit.payload.get("draft_kind", "")).lower()
+        if draft_kind != "credit_request" and not any(word in lowered for word in _MEMORY_MONEY_WORDS):
+            continue
+        outcome = _memory_outcome(hit)
+        amount = _memory_amount(hit)
+        if outcome is None or amount is None:
+            continue
+        sentence = f"You previously {outcome} a {amount} ask on a similar deal"
+        reason = str(hit.payload.get("reason", "")).strip()
+        if outcome == "rejected" and reason:
+            return f"{sentence}: {reason.rstrip('.')}."
+        return f"{sentence}."
+    return None
+
+
 # --------------------------------------------------------------------------- skeptic review
 
 
@@ -1746,12 +1874,22 @@ def perform_request_price_adjustment(
     else:
         used = requested
 
+    broker_rationale = (
+        rationale
+        or f"Immediate capital work established by diligence moves the viable price to {_money(frontier)}."
+    )
+    # What the investor decided last time a price ask like this came up. It is deliberately NOT put
+    # in `broker_rationale`: that string is pasted verbatim into the broker's email, and "You
+    # previously approved a $42,000 ask" is this investor's negotiating history, not something a
+    # broker may read. It rides back on the result instead, where the human who has to approve this
+    # draft -- and the agent writing the summary -- see it.
+    memory_note = credit_memory_note(recall_memories(session, opp))
+
     diligence = diligence_module()
     draft = diligence.compose_credit_request(
         opp,
         used,
-        rationale
-        or f"Immediate capital work established by diligence moves the viable price to {_money(frontier)}.",
+        broker_rationale,
         session.policy,
         in_reply_to=session.message.message_id,
     )
@@ -1764,6 +1902,12 @@ def perform_request_price_adjustment(
     # R5/F1: one credit request per message; a second call is refused by `phase_check` above.
     session.phase_advance("request_price_adjustment")
 
+    note = (
+        f"Your amount was more than 25% away from the ${suggested:,.0f} the frontier implies, "
+        f"so ${used:,.0f} was used instead. Nothing is sent until a human approves this draft."
+        if overridden
+        else "Nothing is sent until a human approves this draft."
+    )
     return {
         "draft_id": draft.draft_id,
         "amount": str(used),
@@ -1773,12 +1917,11 @@ def perform_request_price_adjustment(
         "status": draft.status,
         "requires_approval": draft.requires_approval,
         "sent": draft.status == "sent",
-        "note": (
-            f"Your amount was more than 25% away from the ${suggested:,.0f} the frontier implies, "
-            f"so ${used:,.0f} was used instead. Nothing is sent until a human approves this draft."
-            if overridden
-            else "Nothing is sent until a human approves this draft."
-        ),
+        # The rationale as the human reads it: what this diligence established, plus what they did
+        # about the same ask before. The broker's copy is `broker_rationale` alone.
+        "rationale": broker_rationale if memory_note is None else f"{broker_rationale} {memory_note}",
+        "memory": memory_note,
+        "note": note if memory_note is None else f"{note} {memory_note}",
     }
 
 
@@ -1790,7 +1933,8 @@ def build_alert(session: ProcessingSession, opp: Opportunity, kind: str) -> Noti
 
     Notifiers declare their own `channel`, so the record says where the alert actually went rather
     than the formatter's default. `pending_request` is passed to `format_threshold_alert` only when
-    that formatter accepts it, so this works either side of W10b landing the parameter.
+    that formatter accepts it, so this works either side of W10b landing the parameter; `memories`
+    is passed the same way, so it works either side of W19 landing the "You previously:" line.
     """
     channel = getattr(session.notifier, "channel", None)
     extra: dict[str, Any] = {} if channel is None else {"channel": channel}
@@ -1798,6 +1942,8 @@ def build_alert(session: ProcessingSession, opp: Opportunity, kind: str) -> Noti
     if kind == "fell_below_threshold":
         from dealsieve.notifications import format_fell_below_alert
 
+        if _accepts(format_fell_below_alert, "memories"):
+            extra["memories"] = recall_memories(session, opp)
         return format_fell_below_alert(
             opp,
             session.run_before,
@@ -1809,6 +1955,8 @@ def build_alert(session: ProcessingSession, opp: Opportunity, kind: str) -> Noti
 
     if _accepts(format_threshold_alert, "pending_request"):
         extra["pending_request"] = session.pending_request
+    if _accepts(format_threshold_alert, "memories"):
+        extra["memories"] = recall_memories(session, opp)
     return format_threshold_alert(opp, session.run_before, session.run_after, session.skeptic_report, **extra)
 
 
@@ -2191,6 +2339,8 @@ __all__ = [
     "CREDIT_ROUNDING",
     "CREDIT_TOLERANCE",
     "DILIGENCE_MATCH_THRESHOLD",
+    "MEMORY_PROMPT_LINES",
+    "MEMORY_STRONG_SCORE",
     "OPEN_REQUEST_STATUSES",
     "PHASE_ORDER_TEXT",
     "REPEATABLE_TOOLS",
@@ -2203,6 +2353,7 @@ __all__ = [
     "capex_families",
     "capex_family",
     "capex_rejection_reason",
+    "credit_memory_note",
     "deliver_notification",
     "diligence_items_from",
     "diligence_items_match",
@@ -2217,6 +2368,7 @@ __all__ = [
     "finding_location",
     "make_tools",
     "message_already_recorded",
+    "open_diligence_topics",
     "perform_analyze_document",
     "perform_notify_human",
     "perform_record_claims",
@@ -2224,6 +2376,7 @@ __all__ = [
     "perform_request_price_adjustment",
     "perform_skeptic_review",
     "perform_underwrite",
+    "recall_memories",
     "reconcile_diligence_items",
     "record_underwriting_run",
     "resume_undelivered_notifications",

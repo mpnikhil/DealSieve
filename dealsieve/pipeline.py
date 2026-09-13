@@ -1,6 +1,6 @@
 """The one entry point every channel calls. Owned by W3/W12.
 
-`process_inbound(message, *, repo, policy, notifier, outbox=None, script=None) -> ProcessingOutcome`
+`process_inbound(message, *, repo, policy, notifier, outbox=None, memory=None, script=None) -> ProcessingOutcome`
 
 1. **Claim the message (R4).** `repo.claim_message` atomically inserts it, or re-claims a row left
    `failed`/`processing` by an earlier crash, and says which of `claimed | completed | in_flight`
@@ -53,6 +53,7 @@ from dealsieve.schemas import (
 )
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
+    from dealsieve.memory import MemoryStore
     from dealsieve.outbound import Outbox
 
 logger = logging.getLogger(__name__)
@@ -75,6 +76,24 @@ def _resolve_outbox(outbox: Outbox | None) -> Outbox | None:
         logger.warning("dealsieve.outbound is unavailable; broker mail cannot be sent")
         return None
     return get_outbox()
+
+
+def _resolve_memory(repo: Repo, memory: MemoryStore | None) -> MemoryStore | None:
+    """The caller's decision-memory store, else the one `DEALSIEVE_MEMORY` configures.
+
+    Memory is additive: the agents read it to weight what they already do. A backend that cannot
+    even be constructed must not stop a message being processed, so this degrades to `None` --
+    which the agent layer reads as "recall nothing" -- rather than raising.
+    """
+    if memory is not None:
+        return memory
+    try:
+        from dealsieve.memory import get_memory_store
+
+        return get_memory_store(repo)
+    except Exception as exc:  # noqa: BLE001 -- deliberately broad: memory never breaks the pipeline
+        logger.warning("decision memory is unavailable; processing without it: %s", exc)
+        return None
 
 
 #: What a claim attempt concluded. "claimed" is the only one that processes the message.
@@ -197,7 +216,12 @@ def _isolated(session: ProcessingSession, label: str, call: Callable[[], dict[st
 
 
 def _safety_net(session: ProcessingSession) -> list[str]:
-    """Do, as the SYSTEM actor, whatever the model forgot. The demo cannot depend on a model."""
+    """Do, as the SYSTEM actor, whatever the model forgot. The demo cannot depend on a model.
+
+    Every step here goes through the same `perform_*` the agent would have called, so a safety-net
+    skeptic, credit request or alert consults decision memory exactly as an agent-driven one does:
+    there is no second, memory-blind path through this code.
+    """
     actions: list[str] = []
 
     # 1. Underwrite. Also covers "a document was analyzed but never re-underwritten", which is the
@@ -291,12 +315,16 @@ def process_inbound(
     policy: InvestmentPolicy,
     notifier: Notifier,
     outbox: Outbox | None = None,
+    memory: MemoryStore | None = None,
     script: str | None = None,
 ) -> ProcessingOutcome:
     """Process one inbound message end to end. Never raises.
 
-    `outbox` defaults to `dealsieve.outbound.get_outbox()`; `script` is the path to a
-    `fixtures/scripted/*.json` file and is only meaningful when `DEALSIEVE_MODEL_BACKEND=scripted`.
+    `outbox` defaults to `dealsieve.outbound.get_outbox()`; `memory` to
+    `dealsieve.memory.get_memory_store(repo)`, which the agents consult (never write) so the skeptic,
+    the credit rationale and the alerts carry what this investor decided before; `script` is the path
+    to a `fixtures/scripted/*.json` file and is only meaningful when
+    `DEALSIEVE_MODEL_BACKEND=scripted`.
     """
     backend = "unknown"
     try:
@@ -312,6 +340,7 @@ def process_inbound(
             model_backend=backend,
             script=script,
             outbox=_resolve_outbox(outbox),
+            memory=_resolve_memory(repo, memory),
         )
     except Exception as exc:  # F23: the claim, the backend and the outbox can all raise
         return _startup_failure(message, repo, backend, f"{type(exc).__name__}: {exc}")

@@ -3,6 +3,10 @@
 It runs only when the deterministic engine has already said REVIEW. It has no tools, cannot touch
 the database, and is explicitly forbidden from recomputing finance. It returns structured output
 so its concerns can be stored, shown and turned into broker questions.
+
+It does read decision memory (`dealsieve.memory`): what this investor decided on deals like this one
+and how this broker has behaved go into the prompt as context, so the skeptic weights the concerns
+its employer has actually acted on. It never writes memory.
 """
 
 from __future__ import annotations
@@ -13,11 +17,12 @@ from typing import Literal
 from pydantic import BaseModel, Field
 from strands import Agent
 
-from dealsieve.agents.tools import ProcessingSession
+from dealsieve.agents.tools import MEMORY_PROMPT_LINES, ProcessingSession, recall_memories
 from dealsieve.models import get_model
 from dealsieve.policy import InvestmentPolicy
 from dealsieve.schemas import (
     Evidence,
+    MemoryHit,
     ModelPurpose,
     SkepticConcern,
     SkepticReport,
@@ -158,6 +163,31 @@ def _run_summary(run: UnderwritingResult) -> str:
     )
 
 
+MEMORY_BLOCK_HEADING = "## What this investor decided before, and how this broker behaves"
+
+MEMORY_BLOCK_INSTRUCTION = (
+    "Weight the concerns this investor has acted on before, and expect this broker to stall where "
+    "they have stalled."
+)
+
+
+def _memory_block(memories: list[MemoryHit]) -> list[str]:
+    """The recalled block, or nothing at all.
+
+    Nothing remembered means no block: a deal DealSieve has no history for gets byte-for-byte the
+    prompt it got before decision memory existed. These lines are *context*, not instructions --
+    they say what was decided, never what to decide.
+    """
+    if not memories:
+        return []
+    return [
+        "",
+        MEMORY_BLOCK_HEADING,
+        *[f"- {hit.text}" for hit in memories[:MEMORY_PROMPT_LINES]],
+        MEMORY_BLOCK_INSTRUCTION,
+    ]
+
+
 def _evidence_summary(evidence: list[Evidence]) -> str:
     if not evidence:
         return "  (no evidence recorded)"
@@ -172,7 +202,12 @@ def _evidence_summary(evidence: list[Evidence]) -> str:
 
 
 def build_skeptic_prompt(session: ProcessingSession) -> str:
-    """Render everything the skeptic is allowed to see."""
+    """Render everything the skeptic is allowed to see.
+
+    That now includes what DealSieve remembers -- what this investor decided on deals like this one,
+    and how this broker has behaved -- when there is anything to remember. When there is not, the
+    prompt is exactly the one this function produced before decision memory existed.
+    """
     run = session.run_after
     if run is None:  # pragma: no cover - guarded by the caller
         raise ValueError("the skeptic needs a completed underwriting run")
@@ -219,6 +254,7 @@ def build_skeptic_prompt(session: ProcessingSession) -> str:
         "",
         "## Source documents",
         "\n\n".join(om_sections) if om_sections else "(no attachment text on this message)",
+        *_memory_block(recall_memories(session, opp)),
         "",
         "Return your structured verdict now. Find what is missing.",
     ]
@@ -269,6 +305,8 @@ def run_skeptic(session: ProcessingSession) -> SkepticReport:
 
 
 __all__ = [
+    "MEMORY_BLOCK_HEADING",
+    "MEMORY_BLOCK_INSTRUCTION",
     "OM_EXCERPT_CAP",
     "SYSTEM_PROMPT",
     "SkepticConcernOutput",

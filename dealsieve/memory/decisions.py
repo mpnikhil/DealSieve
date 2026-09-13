@@ -116,6 +116,28 @@ def _kind_label(draft: OutboundDraft) -> str:
     return "follow-up" if draft.kind == "follow_up" else "information request"
 
 
+def _deal_context(opportunity: Opportunity) -> str:
+    """Property type, location and the capital items behind a money decision, so a later similar deal recalls it.
+
+    Recall scores a memory against "<property type> <city> <open topics>"; without these words a credit decision
+    on a roof would never resurface on the next roof."""
+    parts: list[str] = []
+    wv = opportunity.working_values
+    if wv is not None and wv.property_type:
+        parts.append(str(wv.property_type).replace("_", " "))
+    if opportunity.display_name:
+        parts.append(opportunity.display_name)
+    if wv is not None and wv.capex_items:
+        names = []
+        for item in wv.capex_items:
+            head = item.item.split("(")[0].strip().rstrip(",")
+            if head and head.lower() not in (n.lower() for n in names):
+                names.append(head)
+        if names:
+            parts.append("capex: " + ", ".join(names[:3]))
+    return "; ".join(parts)
+
+
 def _decision_text(
     store: MemoryStore,
     draft: OutboundDraft,
@@ -127,21 +149,21 @@ def _decision_text(
     broker = f" to {draft.to_email}" if draft.to_email else ""
     verb = "Approved" if outcome == "approved" else "Rejected"
 
+    context = _deal_context(opportunity)
+
     if draft.kind == "credit_request":
         amount = _credit_amount(draft)
         amount_text = f"${amount:,.0f}" if amount is not None else "a"
         text = f"{verb} a {amount_text} credit request{broker} on {deal}"
-        if outcome == "approved":
-            detail = _approved_credit_detail(opportunity)
-            text += f" ({detail})." if detail else "."
-        else:
-            text += "."
-            if reason:
-                text += f" Reason: {_ensure_period(reason)}"
+        details = [d for d in (context, _approved_credit_detail(opportunity) if outcome == "approved" else None) if d]
+        text += f" ({'; '.join(details)})." if details else "."
+        if outcome == "rejected" and reason:
+            text += f" Reason: {_ensure_period(reason)}"
         return text
 
     if draft.kind == "offer":
-        text = f"{verb} the offer{broker} on {deal}."
+        text = f"{verb} the offer{broker} on {deal}"
+        text += f" ({context})." if context else "."
         if outcome == "rejected" and reason:
             text += f" Reason: {_ensure_period(reason)}"
         return text
