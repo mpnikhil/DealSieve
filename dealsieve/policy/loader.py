@@ -112,6 +112,8 @@ class InvestmentPolicy(_Frozen):
     policy_version: str
     """Content hash identifier, e.g. "v1-3fa9c2d1e0b7". Set by load_policy()."""
     source_path: str
+    raw_yaml: str = ""
+    """The exact text the version hash was computed from, captured at load time (never re-read from disk)."""
 
 
 def _decimalize(obj: Any) -> Any:
@@ -139,4 +141,5 @@ def load_policy(path: str | os.PathLike[str] | None = None) -> InvestmentPolicy:
     data = _decimalize(yaml.safe_load(raw_text))
     data["policy_version"] = policy_version(raw_text, int(data["version"]))
     data["source_path"] = str(p)
+    data["raw_yaml"] = raw_text
     return InvestmentPolicy.model_validate(data)

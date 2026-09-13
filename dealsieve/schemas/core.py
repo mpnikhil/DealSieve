@@ -51,7 +51,6 @@ class DSModel(BaseModel):
 
 class OpportunityStatus(StrEnum):
     NEW = "NEW"
-    SCREENING = "SCREENING"
     DEAD = "DEAD"        # structural failure; repricing does not fix it; not monitored
     WATCH = "WATCH"      # economically unacceptable today; viability frontier stored; monitored
     NEAR = "NEAR"        # within classification.near_threshold_pct of max viable price
@@ -340,6 +339,10 @@ class ViabilityFrontier(DSModel):
     binding_constraints: list[str] = Field(default_factory=list, description="Gate keys that bind at the frontier.")
     paths: list[ViabilityPath] = Field(default_factory=list)
     structural_failures: list[str] = Field(default_factory=list)
+    no_viable_price: bool = Field(
+        default=False,
+        description="True when no purchase price in range passes the economic gates (e.g. NOI <= 0) despite no structural failure.",
+    )
 
 
 class ComparisonRow(DSModel):
