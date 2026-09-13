@@ -43,7 +43,7 @@ internal arithmetic is W1/W9's territory and is only audited where it feeds a st
 
 | Field | Domain | May change it |
 |---|---|---|
-| `status` | `NEW \| SCREENING \| DEAD \| WATCH \| NEAR \| REVIEW` | `perform_underwrite` (`agents/tools.py:876`) only (+ `seed_demo`) |
+| `status` | `NEW \| DEAD \| WATCH \| NEAR \| REVIEW` | `perform_underwrite` (`agents/tools.py:876`) only (+ `seed_demo`) |
 | `previous_status` | same ∪ `None` | `perform_underwrite` (`tools.py:874`), only when the status actually changed |
 | `current_asking_price` | `Money \| None` | `perform_record_claims` (`tools.py:446`) |
 | `working_values` | `WorkingValues \| None` | `perform_record_claims` (`tools.py:445`), `perform_analyze_document` (`tools.py:759-761`, capex only) |
@@ -52,7 +52,7 @@ internal arithmetic is W1/W9's territory and is only audited where it feeds a st
 | `human_attention_required` | bool | `perform_underwrite` (`tools.py:880`): `status == REVIEW`. Never cleared by a human action |
 | `broker_email/name`, `broker_property_ref`, `listing_url` | str \| None | `perform_record_claims` (`tools.py:447-454`) |
 
-`SCREENING` is declared in the enum and never assigned anywhere. `NEW` exists only between
+`SCREENING` was removed from the enum on 2026-09-13 (F16). `NEW` exists only between
 `create_opportunity` and the first `underwrite`.
 
 ### 1.3 `WorkingValues.immediate_capex` — `schemas/core.py:252`
@@ -245,7 +245,7 @@ stateDiagram-v2
     DEAD --> NEAR: underwrite
     DEAD --> REVIEW: underwrite (threshold_crossed)
     note right of NEW
-      SCREENING is declared in the enum
+      (SCREENING removed 2026-09-13, F16)
       and never assigned (F16).
       DEAD is reachable *out of* as well as
       into: nothing pins a dead deal.
@@ -447,7 +447,7 @@ stateDiagram-v2
 > `follow_up_number`.
 
 **Verdict: the `draft→answered` clause now HOLDS — only `sent`/`overdue` requests can be answered
-by a document (F11). The `overdue` and `follow_up_number` clauses are F9/F12.**
+by a document (F11). The `overdue` and `follow_up_number` clauses are F9/F12, both HOLD after the 2026-09-13 fixes (overdue is a read projection; follow-up numbers are per request).**
 
 - `follow_up_count ≤ max`: the eligibility filter is `count < max_follow_ups`
   (`diligence/__init__.py:523-527`) and `reserve_follow_up` is a single conditional `UPDATE … WHERE
@@ -934,7 +934,7 @@ The conflict-detection branch (`:629-635`) only fires on an exact key match.
 `dealsieve.diligence._FAMILIES` already uses for answers (`diligence/__init__.py:66-76`), and when two
 items collide by family but not by text, record a conflict and keep the newer one rather than summing.
 
-**F16 — `OpportunityStatus.SCREENING` is dead.**
+**F16 — `OpportunityStatus.SCREENING` is dead.** *Verdict 2026-09-13: FIXED, the member was removed from the enum.*
 `dealsieve/schemas/core.py:54`. No code assigns or reads it; `repo._STATUS_RANK`
 (`persistence/repo.py:76-80`) does not rank it, so a `SCREENING` opportunity would sort last on the
 watchlist with `rank = 3`. *Severity: low.* *Fix:* remove it from the enum, or use it for the window

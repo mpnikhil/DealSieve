@@ -246,7 +246,7 @@ class World:
 
     @staticmethod
     def _expected_action_exception(action: str, exc: Exception) -> bool:
-        if action == "approve" and isinstance(exc, RuntimeError) and "injected outbox" in str(exc):
+        if action in ("approve", "concurrent_approve") and isinstance(exc, RuntimeError) and "injected outbox" in str(exc):
             return True
         if action == "reject" and type(exc).__name__ == "HTTPException":
             return True
