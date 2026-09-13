@@ -81,6 +81,7 @@ class EventType(StrEnum):
     DILIGENCE_FOLLOW_UP_SENT = "DILIGENCE_FOLLOW_UP_SENT"
     DILIGENCE_ANSWERED = "DILIGENCE_ANSWERED"
     DILIGENCE_STALLED = "DILIGENCE_STALLED"
+    MEMORY_RECORDED = "MEMORY_RECORDED"
     DOCUMENT_ANALYZED = "DOCUMENT_ANALYZED"
     CAPEX_ADJUSTED = "CAPEX_ADJUSTED"
     OUTBOUND_BLOCKED = "OUTBOUND_BLOCKED"
@@ -580,6 +581,46 @@ class DocumentAnalysis(DSModel):
     created_at: datetime = Field(default_factory=now_utc)
 
 
+# --------------------------------------------------------------------------- decision memory
+
+
+MemoryKind = Literal["decision", "broker", "alert", "note"]
+
+
+class MemoryEvent(DSModel):
+    """One remembered thing about how this investor decides or how a broker behaves.
+
+    Namespaces: "investor/<actor>" for human decisions and alert outcomes; "broker/<email>" for broker
+    behaviour derived deterministically from the diligence ledger. Text is a one-line, human-readable
+    sentence; payload keeps the structured facts (deal number, amounts, topics, outcome).
+    """
+
+    memory_event_id: str = Field(default_factory=lambda: new_id("mem"))
+    namespace: str
+    kind: MemoryKind
+    actor: str = Field(description='"human:local", "human:token", "system", or a broker email.')
+    opportunity_id: str | None = None
+    deal_number: int | None = None
+    broker_email: str | None = None
+    text: str
+    payload: dict[str, Any] = Field(default_factory=dict)
+    created_at: datetime = Field(default_factory=now_utc)
+    store: str | None = Field(default=None, description='Backend that holds it: "local" or "agentcore".')
+    external_id: str | None = Field(default=None, description="Backend event id when the store assigns one.")
+
+
+class MemoryHit(DSModel):
+    """A recalled memory with its relevance to the query that surfaced it."""
+
+    memory_event_id: str
+    namespace: str
+    kind: MemoryKind
+    text: str
+    score: float = Field(ge=0.0, le=1.0)
+    created_at: datetime
+    payload: dict[str, Any] = Field(default_factory=dict)
+
+
 # --------------------------------------------------------------------------- outcomes & dashboard
 
 
@@ -640,6 +681,7 @@ class OpportunityDetail(DSModel):
     diligence_requests: list[DiligenceRequest] = Field(default_factory=list)
     document_analyses: list[DocumentAnalysis] = Field(default_factory=list)
     inbound_messages: list[InboundMessage] = Field(default_factory=list)
+    memories: list[MemoryHit] = Field(default_factory=list, description="What DealSieve remembers that bears on this deal.")
 
 
 __all__ = [
@@ -661,6 +703,9 @@ __all__ = [
     "InboundMessage",
     "ModelPurpose",
     "Money",
+    "MemoryKind",
+    "MemoryHit",
+    "MemoryEvent",
     "RequestAnswer",
     "OutboundKind",
     "DocumentFinding",

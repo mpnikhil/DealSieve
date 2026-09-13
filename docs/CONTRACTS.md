@@ -729,3 +729,90 @@ rows when present. Overview: seventh stat tile "Awaiting broker" = `open_diligen
 
 W9 and W11 are independent and fast; W10 next (everything else calls it); W12 builds against W10's interfaces; W13
 against the API shapes. The orchestrator runs `tests/e2e` at the end and owns the fixes across boundaries.
+
+---
+---
+
+# Phase 3: decision memory (added 2026-09-13)
+
+DealSieve's ledger (events, runs, evidence, analyses, requests) is the memory of *what happened*. Phase 3 adds the
+memory of *how this investor decides* and *how each broker behaves*, and makes the agents consult it. The backend
+is Amazon Bedrock AgentCore Memory when configured, with a local SQLite store behind the same interface so the
+offline demo and tests never touch AWS.
+
+## Shared contracts (done by the orchestrator)
+`schemas/core.py`: `MemoryEvent` (namespace, kind decision|broker|alert|note, actor, opportunity_id, deal_number,
+broker_email, text, payload, store, external_id), `MemoryHit` (text, score, kind, created_at, payload),
+`OpportunityDetail.memories`, `EventType.MEMORY_RECORDED`.
+
+## Ownership
+| WS | Owner | Owns |
+|---|---|---|
+| W19 memory store + hooks | Codex | `dealsieve/memory/**` (new), hooks in `dealsieve/diligence/__init__.py` (approve/reject/stall/answer), `dealsieve/agents/skeptic.py` (recall into prompt), `dealsieve/agents/tools.py` (credit rationale + alert line), `dealsieve/notifications/format.py` (optional "You previously..." line), `dealsieve/persistence/{db,repo}.py` (memory_events table + methods), `dealsieve/api/app.py` (detail.memories, GET /api/memory), `dealsieve/cli.py` (`memory` subcommand), `tests/memory/**` |
+| W20 dashboard | agy | `frontend/**` Memory panel |
+
+## dealsieve/memory/
+```
+class MemoryStore(Protocol):
+    name: str                                   # "local" | "agentcore"
+    def record(self, event: MemoryEvent) -> MemoryEvent     # returns the stored event (store, external_id filled)
+    def recall(self, query: str, *, namespaces: list[str], limit: int = 5) -> list[MemoryHit]
+    def list(self, namespace: str, limit: int = 50) -> list[MemoryEvent]
+
+class LocalMemoryStore(MemoryStore)   # SQLite table memory_events via Repo; recall = deterministic ranking:
+                                      # rapidfuzz token_set_ratio(query, text + payload topics) scaled to [0,1],
+                                      # recency tie-break; only hits with score >= 0.35
+class AgentCoreMemoryStore(MemoryStore)
+    # bedrock_agentcore.memory.MemoryClient(region_name=AWS_REGION)
+    # memory id from AGENTCORE_MEMORY_ID, else create_or_get_memory(name="dealsieve_decisions", strategies=[]) once
+    # record -> create_event(memory_id, actor_id=<namespace with '/' -> '_'>, session_id=<opportunity_id or "global">,
+    #           messages=[(event.text, "ASSISTANT")]); external_id = event id returned
+    # recall -> retrieve_memories(memory_id, namespace=f"/{namespace}/", query, top_k=limit) when the memory has
+    #           long-term strategies; else list_events for the actor and rank locally like LocalMemoryStore
+    # Every record is ALSO written to the local table (write-through) so the dashboard and tests never depend on AWS.
+def get_memory_store(repo) -> MemoryStore     # DEALSIEVE_MEMORY = local (default) | agentcore
+def investor_namespace(principal: str) -> str  # "investor/<principal>"  e.g. investor/human:local
+def broker_namespace(email: str) -> str        # "broker/<email lowercased>"
+def remember_decision(store, *, principal, draft, opportunity, outcome: "approved"|"rejected", reason=None) -> MemoryEvent
+    # text e.g. "Approved a $42,000 credit request to maya.chen@brokerage.example on deal #113 (roof capex $90,000; NEAR, 3.4% under ask)."
+    #          "Rejected the information request on deal #107 (topics: Phase I, CAM)."
+def remember_broker_outcome(store, *, broker_email, opportunity, kind: "answered"|"stalled"|"replied", detail) -> MemoryEvent
+    # text e.g. "maya.chen@brokerage.example answered 'Roof age' with a condition report 3 days after the request."
+    #          "maya.chen@brokerage.example went silent on 2 requests after 2 follow-ups (Phase I, CAM)."
+def recall_for_deal(store, opportunity, property, *, topics: list[str], broker_email) -> list[MemoryHit]
+    # query = f"{property.property_type} {property.city} {' '.join(topics)}"; namespaces = [investor/*, broker/<email>]
+```
+Every `record` also appends a `MEMORY_RECORDED` event to the opportunity (when there is one) with the text.
+
+## Hooks (deterministic, no model)
+- `approve_and_send` and the reject path: `remember_decision(...)` with the principal the approver gate recorded.
+- `apply_answers`: `remember_broker_outcome(kind="answered", ...)` with days since sent.
+- `run_follow_ups` stall: `remember_broker_outcome(kind="stalled", ...)`.
+- `analyze_document` when a document answers nothing: `remember_broker_outcome(kind="replied", detail="sent a document that answered none of the open requests")`.
+
+## Consulting memory (the agents read, never write)
+- `run_skeptic`: `recall_for_deal(...)` and add a "What the investor decided before" block (max 5 lines) to the prompt,
+  instructing the skeptic to weight concerns the investor has acted on before.
+- `perform_request_price_adjustment`: the deterministic suggested amount is unchanged; the rationale gains one sentence
+  when a prior credit decision exists ("You approved a $42,000 ask on a similar deal; rejected $60,000 as aggressive").
+- `format_threshold_alert` / `format_fell_below_alert`: optional final line "You previously: <top hit text>" when a hit
+  with score >= 0.6 exists.
+- `opportunity_detail`: `memories = recall_for_deal(...)` (top 5).
+
+## API / CLI
+`GET /api/memory?namespace=&q=&limit=` -> list[MemoryHit] (or list[MemoryEvent] when q is empty);
+`dealsieve memory [--namespace ns] [--q text]`. Env: `DEALSIEVE_MEMORY=local|agentcore`, `AGENTCORE_MEMORY_ID`,
+`AWS_REGION`. Add both to `.env.example`.
+
+## Tests
+`tests/memory/`: local record/recall ranking; hooks record the right text on approve/reject/answer/stall (RecordingOutbox
+world); skeptic prompt contains the recalled block (fake store); credit rationale sentence; alert line; AgentCoreMemoryStore
+against a fake `MemoryClient` (asserts create_event/retrieve arguments and the write-through); one `@pytest.mark.live`
+test that skips without AWS credentials. E2E specs must stay green (memory is additive; no behaviour change when the
+store is empty).
+
+## W20 dashboard
+Deal detail gains a **Memory** panel: "What DealSieve remembers" with hits grouped by namespace (investor decisions,
+this broker), each with text, relative time and a small score bar; empty state "Nothing yet: approve or reject
+something and DealSieve will remember why." Overview header link "Memory" -> `/memory` page listing recent
+MemoryEvents with a namespace filter and a search box hitting `GET /api/memory`.
