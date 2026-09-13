@@ -12,6 +12,8 @@ from __future__ import annotations
 
 import hashlib
 import io
+import logging
+import os
 import time
 from dataclasses import dataclass, field
 from typing import Any
@@ -30,6 +32,9 @@ from dealsieve.schemas import Attachment, Channel
 TELEGRAM_API_BASE = "https://api.telegram.org"
 POLL_TIMEOUT_S = 30
 
+
+
+logger = logging.getLogger(__name__)
 
 def _api_url(token: str, method: str) -> str:
     return f"{TELEGRAM_API_BASE}/bot{token}/{method}"
@@ -219,7 +224,8 @@ class TelegramBot:
                 chat_id, text=text, document=document, caption=message.get("caption")
             )
         except Exception as exc:
-            self._send_text(chat_id, f"Sorry, I couldn't read that: {exc}")
+            logger.warning("telegram message could not be read: %s", exc)
+            self._send_text(chat_id, "Sorry, I couldn't read that message.")
             return
         if inbound is None:
             return
@@ -234,7 +240,15 @@ class TelegramBot:
             )
             self._send_text(chat_id, outcome.summary)
         except Exception as exc:
-            self._send_text(chat_id, f"Sorry, I couldn't process that: {exc}")
+            logger.warning("telegram text ingestion failed: %s", exc)
+            if os.environ.get("DEALSIEVE_MODEL_BACKEND", "cli") == "scripted":
+                self._send_text(
+                    chat_id,
+                    "I'm running in offline demo mode, so I only process the demo emails right now. "
+                    "Alerts and the Approve / Reject buttons work as normal.",
+                )
+            else:
+                self._send_text(chat_id, "Sorry, I couldn't process that message. Forward a broker email or paste a listing URL.")
 
     def _build_inbound(
         self,
