@@ -169,7 +169,9 @@ def _store_images(png_images: list[bytes], sha256: str) -> list[str]:
         return []
 
 
-def _extract_and_store_images(content_type: str, filename: str | None, raw_bytes: bytes, sha256: str) -> list[str]:
+def _extract_and_store_images(
+    content_type: str, filename: str | None, raw_bytes: bytes, sha256: str
+) -> list[str]:
     ext = Path(filename).suffix.lower() if filename else ""
     try:
         if content_type.lower().startswith("image/"):

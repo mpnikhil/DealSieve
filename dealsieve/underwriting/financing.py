@@ -90,9 +90,7 @@ def _compute_financing(
     else:
         dscr = ZERO
     cash_flow_after_debt = noi - annual_debt_service
-    cash_on_cash = (
-        cash_flow_after_debt / equity_deployed if equity_deployed > ZERO else Decimal("999")
-    )
+    cash_on_cash = cash_flow_after_debt / equity_deployed if equity_deployed > ZERO else Decimal("999")
     principal_paydown = year1_principal_paydown(
         loan_amount,
         policy.financing.assumed_interest_rate,

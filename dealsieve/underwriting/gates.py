@@ -32,17 +32,11 @@ def evaluate_gates(
     """
     gate_price = financing.purchase_price if raw_price is None else raw_price
     gate_ltv = financing.ltv if raw_ltv is None else raw_ltv
-    gate_cap = (
-        normalized.normalized_cap_rate
-        if raw_normalized_cap_rate is None
-        else raw_normalized_cap_rate
-    )
+    gate_cap = normalized.normalized_cap_rate if raw_normalized_cap_rate is None else raw_normalized_cap_rate
     gate_dscr = financing.dscr if raw_dscr is None else raw_dscr
     tenant_count_unknown = values.tenant_count is None
     largest_tenant_unknown = values.largest_tenant_pct is None
-    tenant_count_passed = tenant_count_unknown or (
-        values.tenant_count >= policy.property.tenant_count_min
-    )
+    tenant_count_passed = tenant_count_unknown or (values.tenant_count >= policy.property.tenant_count_min)
     largest_tenant_passed = largest_tenant_unknown or (
         values.largest_tenant_pct <= policy.property.largest_tenant_pct_max
     )

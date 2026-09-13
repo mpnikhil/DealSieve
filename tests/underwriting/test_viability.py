@@ -51,3 +51,58 @@ def test_already_passing_price_reports_zero_distance(demo_values, policy):
     values = demo_values.model_copy(update={"asking_price": Decimal("1250000")})
     frontier = solve_max_viable_price(values, policy)
     assert frontier.distance_pct == Decimal("0.000000")
+
+
+# --------------------------------------------------------------------- F18: no price fixes it
+
+
+def _no_income_values(demo_values):
+    """Fixed costs alone exceed the income: NOI is negative at every purchase price.
+
+    Nothing structural fails -- eight tenants, none of them dominant -- so this is not DEAD; it is
+    a deal no purchase price can rescue, which the frontier used to report as a blank.
+    """
+    return demo_values.model_copy(
+        update={
+            "gross_scheduled_income": Decimal("12000"),
+            "stated_noi": Decimal("-28000"),
+            "tenants": [],
+        }
+    )
+
+
+def test_no_price_passes_is_flagged_rather_than_reported_as_a_blank_frontier(demo_values, policy):
+    frontier = solve_max_viable_price(_no_income_values(demo_values), policy)
+
+    assert frontier.no_viable_price is True
+    assert frontier.max_viable_price is None
+    assert frontier.distance_pct is None
+    assert frontier.paths == [], "no price change fixes this deal, so no path claims one does"
+    assert frontier.structural_failures == [], "nothing structural failed"
+    assert frontier.binding_constraints, "the gates that no price can satisfy are still named"
+
+
+def test_an_ordinary_frontier_does_not_set_the_flag(demo_values, policy):
+    assert solve_max_viable_price(demo_values, policy).no_viable_price is False
+
+
+def test_a_structural_failure_is_not_a_no_viable_price(demo_values, policy):
+    values = demo_values.model_copy(
+        update={"tenant_count": 2, "largest_tenant_pct": Decimal("0.78")}
+    )
+    frontier = solve_max_viable_price(values, policy)
+
+    assert frontier.no_viable_price is False, "DEAD is its own outcome, with its own reason"
+    assert frontier.structural_failures
+
+
+def test_the_run_watches_it_and_says_why(demo_values, policy):
+    from dealsieve.schemas import OpportunityStatus
+    from dealsieve.underwriting import run_underwriting
+
+    run = run_underwriting(_no_income_values(demo_values), policy, opportunity_id="opp_no_price")
+
+    assert run.status == OpportunityStatus.WATCH
+    assert run.viability.no_viable_price is True
+    assert run.failure_summary.startswith("No purchase price passes the economic gates (NOI ")
+    assert "$-" in run.failure_summary, "the NOI that makes it unfixable is in the reason"

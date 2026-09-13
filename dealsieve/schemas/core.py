@@ -51,10 +51,10 @@ class DSModel(BaseModel):
 
 class OpportunityStatus(StrEnum):
     NEW = "NEW"
-    DEAD = "DEAD"        # structural failure; repricing does not fix it; not monitored
-    WATCH = "WATCH"      # economically unacceptable today; viability frontier stored; monitored
-    NEAR = "NEAR"        # within classification.near_threshold_pct of max viable price
-    REVIEW = "REVIEW"    # passes every hard gate; human attention justified (not BUY)
+    DEAD = "DEAD"  # structural failure; repricing does not fix it; not monitored
+    WATCH = "WATCH"  # economically unacceptable today; viability frontier stored; monitored
+    NEAR = "NEAR"  # within classification.near_threshold_pct of max viable price
+    REVIEW = "REVIEW"  # passes every hard gate; human attention justified (not BUY)
 
 
 class EventType(StrEnum):
@@ -96,8 +96,8 @@ class Channel(StrEnum):
 
 
 class ConstraintKind(StrEnum):
-    STRUCTURAL = "structural"   # failing it => DEAD; price cannot fix it
-    ECONOMIC = "economic"       # failing it => WATCH/NEAR; a price exists that fixes it
+    STRUCTURAL = "structural"  # failing it => DEAD; price cannot fix it
+    ECONOMIC = "economic"  # failing it => WATCH/NEAR; a price exists that fixes it
 
 
 class Actor(StrEnum):
@@ -143,7 +143,9 @@ class InboundMessage(DSModel):
     urls: list[str] = Field(default_factory=list)
     in_reply_to: str | None = None
     thread_id: str | None = None
-    raw_ref: str | None = Field(default=None, description="Path/key of the preserved raw payload (MIME, JSON).")
+    raw_ref: str | None = Field(
+        default=None, description="Path/key of the preserved raw payload (MIME, JSON)."
+    )
 
 
 # --------------------------------------------------------------------------- evidence & claims
@@ -156,7 +158,9 @@ class Evidence(DSModel):
     field: str
     value: Any
     source_document: str = Field(description="message_id or attachment filename the value came from.")
-    location: str | None = Field(default=None, description='e.g. "email body", "OM page 7", "rent roll row 3"')
+    location: str | None = Field(
+        default=None, description='e.g. "email body", "OM page 7", "rent roll row 3"'
+    )
     quote: str | None = Field(default=None, description="Short verbatim excerpt supporting the value.")
     source_timestamp: datetime | None = None
     confidence: float = Field(ge=0.0, le=1.0)
@@ -212,7 +216,9 @@ class ExtractedClaims(DSModel):
     broker_property_ref: str | None = None
     listing_url: str | None = None
     seller_financing_offered: bool | None = None
-    is_price_change: bool = Field(default=False, description="True if this message announces a new asking price.")
+    is_price_change: bool = Field(
+        default=False, description="True if this message announces a new asking price."
+    )
     evidence: list[Evidence] = Field(default_factory=list)
     missing_fields: list[str] = Field(default_factory=list)
     notes: str | None = None
@@ -267,7 +273,9 @@ class ExpenseLine(DSModel):
     name: str
     broker: Money | None = Field(default=None, description="As stated by the source, if stated.")
     normalized: Money
-    basis: str = Field(description='How DealSieve derived it, e.g. "5% of EGI", "1.25% of price", "as stated".')
+    basis: str = Field(
+        description='How DealSieve derived it, e.g. "5% of EGI", "1.25% of price", "as stated".'
+    )
 
 
 class NormalizedEconomics(DSModel):
@@ -289,7 +297,9 @@ class FinancingResult(DSModel):
     purchase_price: Money
     closing_costs: Money
     immediate_capex: Money = Decimal("0")
-    all_in_basis: Money | None = Field(default=None, description="purchase_price + immediate_capex; cap-rate denominator.")
+    all_in_basis: Money | None = Field(
+        default=None, description="purchase_price + immediate_capex; cap-rate denominator."
+    )
     total_acquisition_cost: Money
     equity_deployed: Money
     loan_amount: Money
@@ -334,9 +344,15 @@ class ViabilityFrontier(DSModel):
     """The counterfactual: what exact change would make this opportunity pass."""
 
     current_price: Money
-    max_viable_price: Money | None = Field(default=None, description="None when no price fixes it (structural).")
-    distance_pct: Rate | None = Field(default=None, description="(current - max_viable) / current; None if structural.")
-    binding_constraints: list[str] = Field(default_factory=list, description="Gate keys that bind at the frontier.")
+    max_viable_price: Money | None = Field(
+        default=None, description="None when no price fixes it (structural)."
+    )
+    distance_pct: Rate | None = Field(
+        default=None, description="(current - max_viable) / current; None if structural."
+    )
+    binding_constraints: list[str] = Field(
+        default_factory=list, description="Gate keys that bind at the frontier."
+    )
     paths: list[ViabilityPath] = Field(default_factory=list)
     structural_failures: list[str] = Field(default_factory=list)
     no_viable_price: bool = Field(
@@ -367,8 +383,12 @@ class UnderwritingResult(DSModel):
     gates: list[GateResult]
     status: OpportunityStatus
     viability: ViabilityFrontier
-    comparison: list[ComparisonRow] = Field(default_factory=list, description="Broker math vs DealSieve math.")
-    failure_summary: str = Field(description='One line. e.g. "Fails on valuation: cap 6.65% < 8.0%, DSCR 1.19x < 1.35x"')
+    comparison: list[ComparisonRow] = Field(
+        default_factory=list, description="Broker math vs DealSieve math."
+    )
+    failure_summary: str = Field(
+        description='One line. e.g. "Fails on valuation: cap 6.65% < 8.0%, DSCR 1.19x < 1.35x"'
+    )
 
 
 # --------------------------------------------------------------------------- opportunity, property, events
@@ -482,7 +502,12 @@ class Notification(DSModel):
     notification_id: str = Field(default_factory=lambda: new_id("ntf"))
     opportunity_id: str
     kind: Literal[
-        "threshold_crossed", "fell_below_threshold", "diligence_stalled", "structural_dead", "status_update", "draft_pending"
+        "threshold_crossed",
+        "fell_below_threshold",
+        "diligence_stalled",
+        "structural_dead",
+        "status_update",
+        "draft_pending",
     ]
     channel: Channel
     title: str
@@ -515,7 +540,9 @@ class OutboundDraft(DSModel):
     subject: str
     body: str
     questions: list[str] = Field(default_factory=list)
-    request_ids: list[str] = Field(default_factory=list, description="DiligenceRequest ids this message carries.")
+    request_ids: list[str] = Field(
+        default_factory=list, description="DiligenceRequest ids this message carries."
+    )
     requires_approval: bool = True
     status: Literal["pending", "approved", "rejected", "sent"] = "pending"
     in_reply_to_message_id: str | None = None
@@ -530,10 +557,14 @@ class DiligenceRequest(DSModel):
 
     request_id: str = Field(default_factory=lambda: new_id("dil"))
     opportunity_id: str
-    topic: str = Field(description='Short noun phrase, e.g. "Roof age", "Phase I environmental", "CAM reconciliation".')
+    topic: str = Field(
+        description='Short noun phrase, e.g. "Roof age", "Phase I environmental", "CAM reconciliation".'
+    )
     question: str
     category: Literal["document", "disclosure", "clarification"] = "document"
-    source_concern: str | None = Field(default=None, description="Skeptic concern topic that produced it, if any.")
+    source_concern: str | None = Field(
+        default=None, description="Skeptic concern topic that produced it, if any."
+    )
     status: Literal["draft", "sent", "answered", "overdue", "stalled", "withdrawn"] = "draft"
     created_at: datetime = Field(default_factory=now_utc)
     sent_at: datetime | None = None
@@ -553,7 +584,9 @@ class DocumentFinding(DSModel):
     severity: Literal["info", "low", "medium", "high"] = "info"
     confidence: float = Field(ge=0.0, le=1.0)
     page: int | None = None
-    image_ref: str | None = Field(default=None, description="Path of the reviewed image this finding rests on.")
+    image_ref: str | None = Field(
+        default=None, description="Path of the reviewed image this finding rests on."
+    )
 
 
 class RequestAnswer(DSModel):
@@ -570,7 +603,14 @@ class DocumentAnalysis(DSModel):
     message_id: str
     filename: str
     document_type: Literal[
-        "inspection_report", "roof_report", "phase_i", "cam_statement", "rent_roll", "lease", "offering_memorandum", "other"
+        "inspection_report",
+        "roof_report",
+        "phase_i",
+        "cam_statement",
+        "rent_roll",
+        "lease",
+        "offering_memorandum",
+        "other",
     ]
     summary: str
     findings: list[DocumentFinding] = Field(default_factory=list)
@@ -578,7 +618,9 @@ class DocumentAnalysis(DSModel):
     capex_items: list[CapexItem] = Field(default_factory=list)
     red_flags: list[str] = Field(default_factory=list)
     images_reviewed: int = 0
-    image_paths: list[str] = Field(default_factory=list, description="Reviewed images, index-aligned with image_ref 'image N'.")
+    image_paths: list[str] = Field(
+        default_factory=list, description="Reviewed images, index-aligned with image_ref 'image N'."
+    )
     text_chars: int = 0
     model_backend: str | None = None
     created_at: datetime = Field(default_factory=now_utc)
@@ -684,7 +726,9 @@ class OpportunityDetail(DSModel):
     diligence_requests: list[DiligenceRequest] = Field(default_factory=list)
     document_analyses: list[DocumentAnalysis] = Field(default_factory=list)
     inbound_messages: list[InboundMessage] = Field(default_factory=list)
-    memories: list[MemoryHit] = Field(default_factory=list, description="What DealSieve remembers that bears on this deal.")
+    memories: list[MemoryHit] = Field(
+        default_factory=list, description="What DealSieve remembers that bears on this deal."
+    )
 
 
 __all__ = [

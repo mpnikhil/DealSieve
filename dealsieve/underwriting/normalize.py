@@ -52,8 +52,7 @@ def _normalize_economics(
     if policy.normalization.require_property_tax_reset:
         property_tax = price * policy.normalization.property_tax_rate_pct
         property_tax_basis = (
-            f"{_percent_label(policy.normalization.property_tax_rate_pct)}% of price "
-            "(reassessed at sale)"
+            f"{_percent_label(policy.normalization.property_tax_rate_pct)}% of price (reassessed at sale)"
         )
     else:
         property_tax = stated.property_tax or ZERO
@@ -89,8 +88,7 @@ def _normalize_economics(
             "Repairs & maintenance",
             stated.repairs_maintenance,
             repairs_maintenance,
-            "max(as stated, "
-            f"{_percent_label(policy.normalization.min_repairs_pct_of_egi)}% of EGI)",
+            f"max(as stated, {_percent_label(policy.normalization.min_repairs_pct_of_egi)}% of EGI)",
         ),
         ("Utilities", stated.utilities, utilities, "as stated"),
         (

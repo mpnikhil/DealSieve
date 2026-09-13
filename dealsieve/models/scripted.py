@@ -91,7 +91,9 @@ def _load_input(raw: dict[str, Any], repo_root: Path) -> dict[str, Any]:
     return value
 
 
-def load_script(path: str | Path, *, repo_root: Path | None = None) -> tuple[list[ScriptedTurn], dict[str, Any]]:
+def load_script(
+    path: str | Path, *, repo_root: Path | None = None
+) -> tuple[list[ScriptedTurn], dict[str, Any]]:
     """Parse a scripted-model JSON file into turns and structured outputs."""
     root = repo_root or REPO_ROOT
     script_path = Path(path)
@@ -198,7 +200,9 @@ class ScriptedModel(Model):
     def _next_turn(self) -> ScriptedTurn:
         if self._index >= len(self._turns):
             logger.warning(
-                "scripted model exhausted after %d turns (script=%s)", len(self._turns), self.config.get("script")
+                "scripted model exhausted after %d turns (script=%s)",
+                len(self._turns),
+                self.config.get("script"),
             )
             return ScriptedTurn(final_text=EXHAUSTED_TEXT)
         turn = self._turns[self._index]
@@ -232,13 +236,9 @@ class ScriptedModel(Model):
 
         for call in turn.tool_calls:
             tool_use_id = f"scripted_{uuid.uuid4().hex[:16]}"
+            yield {"contentBlockStart": {"start": {"toolUse": {"name": call.name, "toolUseId": tool_use_id}}}}
             yield {
-                "contentBlockStart": {"start": {"toolUse": {"name": call.name, "toolUseId": tool_use_id}}}
-            }
-            yield {
-                "contentBlockDelta": {
-                    "delta": {"toolUse": {"input": json.dumps(call.input, default=str)}}
-                }
+                "contentBlockDelta": {"delta": {"toolUse": {"input": json.dumps(call.input, default=str)}}}
             }
             yield {"contentBlockStop": {}}
 

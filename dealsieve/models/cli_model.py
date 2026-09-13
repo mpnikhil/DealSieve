@@ -260,7 +260,7 @@ def _read_tool_note(paths: list[Path], images: tuple[CLIImage, ...]) -> str:
     listing = "\n".join(f"- image {img.index}: {path}" for img, path in zip(images, paths, strict=True))
     return (
         "\n\n## Images\nThe images referenced above are on disk. Open each one with the Read tool "
-        f"before answering, and cite them as \"image N\":\n{listing}"
+        f'before answering, and cite them as "image N":\n{listing}'
     )
 
 
@@ -453,9 +453,7 @@ def _render_content_block(block: dict[str, Any], image_counter: list[int]) -> st
             elif "json" in item:
                 parts.append(json.dumps(item["json"], sort_keys=True, default=str))
         body = "\n".join(parts) if parts else "(no content)"
-        return (
-            f"[tool result] id={result.get('toolUseId')} status={result.get('status', 'success')}\n{body}"
-        )
+        return f"[tool result] id={result.get('toolUseId')} status={result.get('status', 'success')}\n{body}"
     if "reasoningContent" in block:
         return None
     return None
@@ -468,9 +466,7 @@ def _render_transcript(messages: Messages) -> str:
         role = message.get("role", "user")
         rendered = [
             text
-            for text in (
-                _render_content_block(block, image_counter) for block in message.get("content", [])
-            )
+            for text in (_render_content_block(block, image_counter) for block in message.get("content", []))
             if text
         ]
         if not rendered:
@@ -541,9 +537,7 @@ def render_prompt(
 
     if error_feedback:
         sections.append(
-            "## Your previous attempt was rejected\n"
-            f"{error_feedback}\n"
-            "Produce a corrected JSON object now."
+            f"## Your previous attempt was rejected\n{error_feedback}\nProduce a corrected JSON object now."
         )
     return "\n\n".join(sections)
 
@@ -568,8 +562,7 @@ def render_structured_output_prompt(
     )
     if error_feedback:
         sections.append(
-            "## Your previous attempt was rejected\n"
-            f"{error_feedback}\nProduce a corrected JSON object now."
+            f"## Your previous attempt was rejected\n{error_feedback}\nProduce a corrected JSON object now."
         )
     return "\n\n".join(sections)
 
@@ -826,11 +819,7 @@ class CLIModel(Model):
 
         for call in parsed.tool_calls:
             tool_use_id = f"cli_{uuid.uuid4().hex[:16]}"
-            yield {
-                "contentBlockStart": {
-                    "start": {"toolUse": {"name": call.name, "toolUseId": tool_use_id}}
-                }
-            }
+            yield {"contentBlockStart": {"start": {"toolUse": {"name": call.name, "toolUseId": tool_use_id}}}}
             yield {"contentBlockDelta": {"delta": {"toolUse": {"input": call.input_json}}}}
             yield {"contentBlockStop": {}}
 

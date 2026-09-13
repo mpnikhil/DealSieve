@@ -116,9 +116,7 @@ def render_message_prompt(message: InboundMessage, *, attachment_cap: int = ATTA
             header = f"\n### {attachment.filename} ({attachment.content_type}, {attachment.size_bytes} bytes)"
             if attachment.image_paths:
                 header += f"\n{len(attachment.image_paths)} embedded image(s); call analyze_document on it."
-            elif attachment.content_type == "application/pdf" or attachment.filename.lower().endswith(
-                ".pdf"
-            ):
+            elif attachment.content_type == "application/pdf" or attachment.filename.lower().endswith(".pdf"):
                 header += "\nPDF; call analyze_document on it."
             lines.append(header)
             if attachment.text:

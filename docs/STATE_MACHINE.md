@@ -562,7 +562,10 @@ working values actually moved (F13).**
   hands the retry straight to underwrite/notify. `perform_underwrite` then reuses the opportunity's
   latest run when its `inputs` equal the working values it would be handed, so one message still
   yields one immutable run; if a document analysed on the retry moved the basis, the inputs differ
-  and a fresh run is produced, which is a real condition change.
+  and a fresh run is produced, which is a real condition change. The retry also reuses that run's
+  skeptic report instead of paying for a second model call, refuses to raise diligence a second time
+  for a message that already raised it, and refuses to draft a second credit request for it — one
+  message asks the broker once, however often it is retried.
 - A non-stale `processing` row is no longer reported as "already processed" (F14): `claim_message`
   returns `claimed | completed | in_flight` and the pipeline gives `in_flight` its own summary,
   "message … is being processed by another worker".
@@ -749,10 +752,13 @@ pending credit draft therefore neither advances nor obstructs the cadence.
 
 ## 6. Loose ends
 
-Numbered; each has file:line, a severity, and a proposed fix. **None of these are implemented.**
+Numbered; each has file:line, a severity, and a proposed fix, written before any of them were
+implemented. A finding that has since been fixed carries a **Verdict** line naming the mechanism;
+the body below it is the original diagnosis and is kept as the record of what was wrong.
 
 **F1 — `request_diligence` and `request_price_adjustment` are unbounded within one message
 (breaks R5/S11).**
+**Verdict: HOLDS — both tools call `phase_advance` after their write, so a second call returns `{"skipped": …}` and creates no request, draft or event.**
 `dealsieve/agents/tools.py:1110` and `:1225` call `session.phase_check(...)` but never
 `session.phase_advance(...)`; `phase_advance` appears only at `:433, :459, :788, :929, :956, :1517`.
 Reproduced against a real `Repo`: three `request_diligence` calls → three `DiligenceRequest` rows all
@@ -823,6 +829,7 @@ raises. *Severity: high.* *Fix:* make `store_draft` an upsert (or have `dispatch
 the existing pending draft by id and leave it alone.
 
 **F6 — A notifier that succeeds but whose persistence fails afterwards double-interrupts the human.**
+**Verdict: HOLDS — the post-send bookkeeping is wrapped: the alert is delivered in memory with its `delivery_ref`, the failure becomes a NOTE and marks the message failed, and the resume step skips rows that already carry a ref.**
 `dealsieve/agents/tools.py:1384` (`send`) then `:1414` (`update_notification`) with no try/except
 between them. If the update raises, `session.notification` is never set (`:1415`), the row stays
 `delivered=False`, `pipeline.py:307-309` computes `undelivered = False` (because
@@ -874,6 +881,7 @@ remove it from the enum and from the four call sites above.
 (F2) and from an explicit "stop chasing" action.
 
 **F11 — A document can mark a request `answered` that was never sent.**
+**Verdict: HOLDS — only `sent`/`overdue` requests are matched; a document that settles an unsent topic keeps the answer on the analysis, appends a NOTE and is exposed on `ProcessingSession.answered_before_asked` for the approve step to drop.**
 `dealsieve/agents/tools.py:475` (`OPEN_REQUEST_STATUSES` includes `"draft"`) → `:672-676` →
 `diligence.apply_answers` (`diligence/__init__.py:431-467`) sets `status="answered"` on a `draft`
 request. Reachable in the shipped demo: message 05 arriving before the human taps Approve marks the
@@ -893,6 +901,7 @@ minimum (or render "follow-up #k" per request in the body) and derive the `draft
 sorted request-id set plus the tick, not from `min(request_id)` and a batch maximum.
 
 **F13 — Retrying a failed message duplicates its whole event and run history.**
+**Verdict: HOLDS — `record_claims` resumes a message whose `MESSAGE_RECEIVED` is already on the deal, and `underwrite` reuses that message's run unless the working values moved.**
 `dealsieve/pipeline.py:248` re-claims a `failed`/stale row and re-runs from the top; nothing in
 `perform_record_claims` (`agents/tools.py:290`) is keyed on "already processed this message". The
 result is a second `MESSAGE_RECEIVED`/`DOCUMENT_ADDED`/`CLAIMS_EXTRACTED`, a second
@@ -916,6 +925,7 @@ crashed worker's message is silently un-processable for half an hour.
 and give the in-flight case its own outcome summary and a `202`-style signal from the API.
 
 **F15 — Two documents pricing the same work under different words double-count it.**
+**Verdict: HOLDS — capex items match on the diligence keyword families (plus electrical/plumbing/structural/fire) across analyses; a family collision is a recorded conflict and the later estimate wins, never a sum.**
 `aggregate_capex_items` keys on `_capex_key` = casefolded, whitespace-collapsed item text
 (`dealsieve/agents/tools.py:607-609,623`). "Roof replacement" from report A and "Roof membrane
 replacement" from report B are distinct keys, so both enter the basis and `immediate_capex` doubles.
@@ -939,6 +949,7 @@ written later still, at `:877`). *Fix:* add a `Repo.record_underwriting(run, eve
 inside one `BEGIN IMMEDIATE`, and have the safety net reconcile an orphan run on the next message.
 
 **F18 — A deal with no viable price at any level lands in `WATCH` with no frontier.**
+**Verdict: HOLDS — `solve_max_viable_price` sets `no_viable_price=True` with empty paths, `classify` returns WATCH on that flag, the run says "No purchase price passes the economic gates (NOI …)", and `request_price_adjustment` skips with that reason. S7 restated to allow exactly this shape.**
 `dealsieve/underwriting/viability.py:78-84` returns `max_viable_price=None, distance_pct=None` when
 even `$0.01` fails the economic gates (NOI ≤ 0, for instance);
 `dealsieve/underwriting/classify.py:23-27` then falls through to `WATCH` because `distance_pct is
@@ -950,6 +961,7 @@ non-structural reason, or as `WATCH` with an explicit `reason_summary` of "no pr
 restate S7 to allow exactly that shape.
 
 **F19 — The archived policy YAML is re-read at underwrite time, not captured at load time.**
+**Verdict: HOLDS — `_policy_yaml` returns `policy.raw_yaml` captured by `load_policy` and re-checks that it hashes to `policy.policy_version`; a body that does not is refused, logged and left unarchived rather than recorded as this run's policy.**
 `dealsieve/agents/tools.py:280-284` reads `policy.source_path` from disk and `:845` hands it to
 `record_policy_version` (`persistence/repo.py:557`, `INSERT OR IGNORE`). `policy_version` is the hash
 of the text read by `load_policy` (`policy/loader.py:130-137`). If the file changes between the two,
@@ -971,6 +983,7 @@ schedule) that re-delivers undelivered notifications and re-claims failed messag
 logged.
 
 **F21 — A skeptic report on a deal already in REVIEW raises nothing.**
+**Verdict: HOLDS — safety-net step 3 is guarded on `skeptic_report is not None and not diligence_requests`; the REVIEW check stays where it belongs, inside `perform_request_diligence`.**
 `dealsieve/pipeline.py:170` guards safety-net step 3 on `session.threshold_crossed`, while
 `perform_skeptic_review` (`agents/tools.py:945`) only requires `status == REVIEW`. A second message
 on a REVIEW deal can therefore produce a report full of `evidence_status: "missing"` concerns with
@@ -990,6 +1003,7 @@ row `delivered=False`, and have the sweeper from F20 resume it; and wrap each op
 `run_follow_ups` so one bad notifier cannot abort the whole tick.
 
 **F23 — `process_inbound` can raise (breaks L4).**
+**Verdict: HOLDS — the backend name, the claim and the session construction are inside the guard; a startup failure returns a `ProcessingOutcome` carrying the error and marks the row failed when one exists.**
 `dealsieve/pipeline.py:246` (`backend_name()`), `:248` (`_claim` → `repo.claim_message`, which
 re-raises `sqlite3.OperationalError` after 100 lock retries, `persistence/repo.py:167-168`), and
 `:251-259` (`ProcessingSession(... outbox=_resolve_outbox(outbox))`, where `get_outbox` raises
@@ -1011,6 +1025,19 @@ screen is deliberately conservative, but nothing tells the human *why* their dil
 *Severity: low.* *Fix:* keep the conservative screen but require the money-ish term to co-occur with
 a negotiating verb or an amount for the `credit_request` classification, and surface
 `OUTBOUND_BLOCKED` in the alert/dashboard with the offending phrase so a human can edit and re-approve.
+
+**F26 — A document analysed before the deal had working values left its capex out of the basis.**
+**Verdict: HOLDS — `perform_record_claims` recomputes `immediate_capex`/`capex_items` from `repo.list_document_analyses` (`apply_stored_capex`) and appends `CAPEX_ADJUSTED` when the total moves.**
+Found by the trace explorer (`tests/model`), not by reading: inject `05_inspection_report` and then
+`01_initial_offer`. The condition report carries no price, so `reconcile` raises `MissingInputs`
+(`agents/tools.py`, the early-return path) and the opportunity has no `WorkingValues` for
+`perform_analyze_document` to hang $90,000 of verified roof, HVAC and paving work on — that block is
+guarded on `working is not None`. The offering then built fresh working values from its own claims
+and `reconcile` carried forward an `immediate_capex` of zero, so the stored analyses and the basis
+disagreed: all-in $1,550,000 where S6 requires $1,640,000. *Severity: medium* (capex moves the gate
+outcome directly, and message order is not something the product controls). *Fixed:* the basis is
+derived at every message from the stored analyses rather than inherited, so any arrival order
+converges on the same union. Regression: `tests/agents/test_capex_carry_forward.py`.
 
 **F25 — `human_attention_required` is never cleared by a human.**
 **Verdict: HOLDS — approve, reject, review, and ignore share an acknowledgement action that clears the latch and appends `Acknowledged by <principal>`.**

@@ -35,7 +35,6 @@ import re
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
 from decimal import Decimal, InvalidOperation
-from pathlib import Path
 from types import ModuleType
 from typing import TYPE_CHECKING, Any, Literal
 
@@ -46,6 +45,7 @@ from dealsieve.evidence.reconcile import MissingInputs, reconcile
 from dealsieve.identity.resolver import extract_identity_keys, normalize_address, resolve
 from dealsieve.notifications import format_threshold_alert
 from dealsieve.policy import InvestmentPolicy
+from dealsieve.policy.loader import policy_version as policy_version_of
 from dealsieve.schemas import (
     Actor,
     Attachment,
@@ -65,6 +65,7 @@ from dealsieve.schemas import (
     Property,
     SkepticReport,
     UnderwritingResult,
+    WorkingValues,
 )
 from dealsieve.underwriting import run_underwriting
 
@@ -173,8 +174,18 @@ class ProcessingSession:
     credit_draft: OutboundDraft | None = None
     analyses: list[DocumentAnalysis] = field(default_factory=list)
     diligence_requests: list[DiligenceRequest] = field(default_factory=list)
+    answered_before_asked: list[str] = field(default_factory=list)
+    """Topics a document answered while their request was still an unsent draft (F11).
+
+    The request is left in `draft` -- nobody asked it yet -- and whoever composes or approves the
+    outgoing message uses this list to drop the question instead of asking something the record
+    already answers.
+    """
     events_created: list[str] = field(default_factory=list)
     claims_recorded: bool = False
+    replayed_message: bool = False
+    """True when this message had already been recorded on the opportunity and record_claims
+    reused that work instead of appending a second copy of its events (F13)."""
     errors: list[str] = field(default_factory=list)
 
     # -- bookkeeping used to build prompts and trigger references ----------
@@ -234,8 +245,16 @@ class ProcessingSession:
                 payload=payload or {},
             )
         )
+        return self.register_event(stored)
+
+    def register_event(self, stored: OpportunityEvent) -> OpportunityEvent:
+        """Book an event that is already appended, wherever the append happened.
+
+        `append_event` uses it, and so does the combined run+event write (F17), which hands the
+        append to the repository so both rows land in one transaction.
+        """
         self.events_created.append(stored.event_id)
-        self.event_types_created.add(event_type)
+        self.event_types_created.add(stored.type)
         self.last_event_id = stored.event_id
         return stored
 
@@ -278,13 +297,142 @@ def _display_name(claims: ExtractedClaims, message: InboundMessage) -> str:
 
 
 def _policy_yaml(policy: InvestmentPolicy) -> str:
-    try:
-        return Path(policy.source_path).read_text(encoding="utf-8")
-    except OSError:  # pragma: no cover - defensive
+    """The exact text `policy.policy_version` was computed from (F19).
+
+    Captured by `load_policy` and carried on the frozen policy object. Re-reading
+    `policy.source_path` here would archive whatever the file says *now*, which need not be what
+    this run was underwritten under; the archive would then not hash to the recorded version, and
+    it would do so silently. The hash is re-checked rather than trusted.
+    """
+    raw = getattr(policy, "raw_yaml", "") or ""
+    if not raw:  # pragma: no cover - only a hand-built policy object has no captured text
+        logger.warning("policy %s carries no raw_yaml; archiving an empty policy body", policy.policy_version)
         return ""
+    computed = policy_version_of(raw, policy.version)
+    if computed != policy.policy_version:  # pragma: no cover - defensive
+        raise ValueError(
+            f"policy text does not hash to {policy.policy_version} (got {computed}); "
+            "refusing to archive a policy body that is not the one this run used"
+        )
+    return raw
 
 
 # --------------------------------------------------------------------------- record_claims
+
+
+def events_for_message(repo: Repo, opportunity_id: str, message_id: str) -> list[OpportunityEvent]:
+    """Every event this opportunity already carries for `message_id`, oldest first."""
+    try:
+        events = list(repo.list_events(opportunity_id))
+    except Exception:  # pragma: no cover - a repo that cannot list is not a reason to duplicate
+        logger.exception("could not list events for %s", opportunity_id)
+        return []
+    return [event for event in events if event.source_message_id == message_id]
+
+
+def message_already_recorded(repo: Repo, opportunity_id: str, message_id: str) -> list[OpportunityEvent]:
+    """The recorded events for this message, but only once it really was recorded (F13).
+
+    "Recorded" means a `MESSAGE_RECEIVED` for this `source_message_id` is already on the deal: the
+    message, its documents and its claims are in the log, so a retry must not append a second copy
+    of them.
+    """
+    recorded = events_for_message(repo, opportunity_id, message_id)
+    if any(event.type == EventType.MESSAGE_RECEIVED for event in recorded):
+        return recorded
+    return []
+
+
+def _resume_record_claims(
+    session: ProcessingSession,
+    opp: Opportunity,
+    claims: ExtractedClaims,
+    recorded: list[OpportunityEvent],
+    *,
+    actor: Actor = Actor.AGENT,
+) -> dict[str, Any]:
+    """Pick a retried message up where it stopped instead of re-recording it (F13).
+
+    A message is marked *failed* whenever it produced no run or its alert never reached the human
+    (G3), and a failed message is re-claimable -- so the retry is the expected path, not an exotic
+    one. Re-running `record_claims` from the top used to append a second
+    `MESSAGE_RECEIVED`/`DOCUMENT_ADDED`/`CLAIMS_EXTRACTED`, a second `source_documents` row, fresh
+    evidence ids and, downstream, a second immutable underwriting run for one message. None of that
+    is new information, so none of it is written again: the retry resumes at underwrite/notify with
+    the values the first attempt established.
+    """
+    repo = session.repo
+    message = session.message
+    session.replayed_message = True
+    session.last_event_id = recorded[-1].event_id
+    for event in recorded:
+        session.event_types_created.add(event.type)
+
+    working = opp.working_values
+    if working is None:
+        # The first attempt recorded the message but never reached usable values. That part was
+        # not done, so doing it now is not a repeat.
+        try:
+            working, changes = reconcile(None, claims)
+        except MissingInputs as exc:
+            session.errors.append(f"missing inputs: {', '.join(exc.missing)}")
+            session.append_event(
+                EventType.NOTE,
+                f"Cannot underwrite yet: missing {', '.join(exc.missing)}",
+                {"missing": list(exc.missing), "replayed": True},
+                actor=actor,
+            )
+            repo.link_message_to_opportunity(message.message_id, opp.opportunity_id)
+            session.phase_advance("record_claims")
+            return {
+                "opportunity_id": opp.opportunity_id,
+                "deal_number": opp.deal_number,
+                "created": False,
+                "replayed": True,
+                "error": str(exc),
+                "missing": list(exc.missing),
+            }
+        for change in changes:
+            session.append_event(change.type, change.summary, _jsonable(change.payload), actor=actor)
+        opp.working_values = working
+        opp.current_asking_price = working.asking_price
+        opp = repo.save_opportunity(opp)
+
+    previous_capex = Decimal(working.immediate_capex or 0)
+    capex_total, _, _ = apply_stored_capex(session, opp.opportunity_id, working)
+    if capex_total != previous_capex:  # pragma: no cover - only when an analysis outlived the run
+        opp.working_values = working
+        opp = repo.save_opportunity(opp)
+
+    session.append_event(
+        EventType.NOTE,
+        f"Message {message.message_id} was already recorded on this deal; "
+        "resuming the earlier attempt instead of re-recording it",
+        {
+            "message_id": message.message_id,
+            "recorded_events": len(recorded),
+            "replayed": True,
+        },
+        actor=Actor.SYSTEM,
+    )
+
+    repo.link_message_to_opportunity(message.message_id, opp.opportunity_id)
+    session.claims_recorded = True
+    session.phase_advance("record_claims")
+    return {
+        "opportunity_id": opp.opportunity_id,
+        "deal_number": opp.deal_number,
+        "created": False,
+        "status": opp.status.value,
+        "replayed": True,
+        "changes": [],
+        "conflicts": list(working.conflicts),
+        "missing_fields": list(claims.missing_fields),
+        "note": (
+            "this message is already on the record; its claims, documents and evidence were kept "
+            "and nothing was written twice"
+        ),
+    }
 
 
 def perform_record_claims(
@@ -319,9 +467,10 @@ def perform_record_claims(
             raise ValueError(f"resolver returned unknown opportunity {opportunity_id}")
         session.status_before = opp.status
     else:
-        normalized = normalize_address(
-            claims.address_line, claims.city, claims.state, claims.postal_code
-        ) or f"UNRESOLVED:{message.message_id}"
+        normalized = (
+            normalize_address(claims.address_line, claims.city, claims.state, claims.postal_code)
+            or f"UNRESOLVED:{message.message_id}"
+        )
         prop = repo.upsert_property(
             Property(
                 canonical_address=claims.address_line or _display_name(claims, message),
@@ -351,6 +500,12 @@ def perform_record_claims(
 
     session.opportunity_id = opportunity_id
     session.created = created
+
+    # --- already recorded? then this is a retry, not a new message (F13) --
+    if not created:
+        recorded = message_already_recorded(repo, opportunity_id, message.message_id)
+        if recorded:
+            return _resume_record_claims(session, opp, claims, recorded, actor=actor)
 
     # --- events, in contract order ---------------------------------------
     session.append_event(
@@ -406,8 +561,7 @@ def perform_record_claims(
 
     session.append_event(
         EventType.CLAIMS_EXTRACTED,
-        f"Claims extracted from {message.message_id}"
-        + (" (price change)" if claims.is_price_change else ""),
+        f"Claims extracted from {message.message_id}" + (" (price change)" if claims.is_price_change else ""),
         {
             "asking_price": str(claims.asking_price) if claims.asking_price is not None else None,
             "stated_noi": str(claims.stated_noi) if claims.stated_noi is not None else None,
@@ -442,6 +596,35 @@ def perform_record_claims(
     for change in changes:
         session.append_event(change.type, change.summary, _jsonable(change.payload), actor=actor)
 
+    # The basis is recomputed from the stored analyses, never inherited (S6). A condition report
+    # that arrived before the offering has its capex folded in here, at the first message that
+    # produces working values to hold it.
+    previous_capex = Decimal(opp.working_values.immediate_capex) if opp.working_values else Decimal(0)
+    capex_total, _, capex_conflicts = apply_stored_capex(session, opportunity_id, working)
+    if capex_total != previous_capex:
+        session.append_event(
+            EventType.CAPEX_ADJUSTED,
+            f"Immediate capex {_money(previous_capex)} -> {_money(capex_total)} "
+            f"from {len(working.capex_items)} verified item(s) already on file",
+            {
+                "from": str(previous_capex),
+                "to": str(capex_total),
+                "source_document": None,
+                "items": [
+                    {
+                        "item": i.item,
+                        "low": str(i.low),
+                        "high": str(i.high),
+                        "urgency": i.urgency,
+                        "source_document": i.source_document,
+                    }
+                    for i in working.capex_items
+                ],
+                "conflicts": capex_conflicts,
+            },
+            actor=actor,
+        )
+
     opp.working_values = working
     opp.current_asking_price = working.asking_price
     if message.sender and not opp.broker_email:
@@ -471,8 +654,14 @@ def perform_record_claims(
 
 # --------------------------------------------------------------------------- analyze_document
 
-#: Statuses a diligence request can be in and still be waiting on the broker.
+#: Statuses a diligence request can be in and still be waiting on the broker. `draft` is included
+#: because the inspector should still see an unsent question -- a document may well answer it.
 OPEN_REQUEST_STATUSES = ("draft", "sent", "overdue")
+
+#: Statuses a document may actually *answer* (F11). A `draft` request has not been asked, so no
+#: document can be the broker's reply to it; marking it "answered" puts a reply in the record for a
+#: question that was never sent.
+ANSWERABLE_REQUEST_STATUSES = ("sent", "overdue")
 
 
 def find_attachment(message: InboundMessage, filename: str | None) -> Attachment | None:
@@ -586,9 +775,7 @@ def capex_rejection_reason(item: CapexItem, document_text: str) -> str:
     return f"{figures} does not appear in the text of {item.source_document}"
 
 
-def verify_capex_items(
-    items: list[CapexItem], document_text: str
-) -> tuple[list[CapexItem], list[CapexItem]]:
+def verify_capex_items(items: list[CapexItem], document_text: str) -> tuple[list[CapexItem], list[CapexItem]]:
     """Split model-proposed capex into (accepted, rejected) against what the document actually says.
 
     Capex moves the underwriting basis, so an item is a *proposal* until both of its dollar figures
@@ -609,31 +796,136 @@ def _capex_key(item_text: str) -> str:
     return " ".join(item_text.split()).casefold()
 
 
+#: Capital-work vocabularies the diligence engine does not need for *answers* but that price the
+#: same work here. Appended to `dealsieve.diligence._FAMILIES` rather than replacing it, so the two
+#: sides of the system agree on what "the roof question" and "the roof line item" have in common.
+_EXTRA_CAPEX_FAMILIES: tuple[frozenset[str], ...] = (
+    frozenset({"electrical", "wiring", "panel", "panels", "switchgear"}),
+    frozenset({"plumbing", "sewer", "piping", "pipes", "backflow"}),
+    frozenset({"structural", "foundation", "slab", "seismic"}),
+    frozenset({"fire", "sprinkler", "sprinklers", "alarm"}),
+)
+
+#: Families used only when the diligence engine cannot be imported.
+_FALLBACK_DILIGENCE_FAMILIES: tuple[frozenset[str], ...] = (
+    frozenset({"roof", "roofing", "membrane"}),
+    frozenset({"hvac", "mechanical", "heating", "cooling"}),
+    frozenset({"phase", "environmental", "esa"}),
+    frozenset({"parking", "paving", "pavement"}),
+)
+
+
+def capex_families() -> tuple[frozenset[str], ...]:
+    """The keyword families two capex line items must share to be the same work (F15)."""
+    try:
+        families = getattr(diligence_module(), "_FAMILIES", None)
+    except Exception:  # pragma: no cover - only before the diligence package lands
+        families = None
+    base = tuple(families) if families else _FALLBACK_DILIGENCE_FAMILIES
+    return base + _EXTRA_CAPEX_FAMILIES
+
+
+def capex_family(item_text: str) -> str | None:
+    """Which keyword family this item belongs to, or None when it names work of its own."""
+    tokens = set(_WORD_RE.findall((item_text or "").casefold()))
+    for index, family in enumerate(capex_families()):
+        if tokens & family:
+            return f"family:{index}"
+    return None
+
+
 def aggregate_capex_items(
     analyses: Iterable[DocumentAnalysis],
 ) -> tuple[list[CapexItem], list[str]]:
     """Union the verified capex of every analysis of one opportunity, newest estimate winning.
 
     A second document must not erase the first document's capital work (that defect quietly halved
-    the basis), and the same item priced twice must not count twice. Items are matched on normalized
-    item text; when two documents price the same item differently the later figure is used and the
-    disagreement is returned as a conflict string, because contradictory source data is recorded,
-    never silently resolved.
+    the basis), and the same item priced twice must not count twice -- **including when the two
+    reports word it differently** (F15). "Roof replacement" and "Roof membrane replacement" are one
+    roof, and adding them moves the gate outcome on work nobody is doing twice.
+
+    Matching is therefore two-stage: exact normalized text first, then, across *different*
+    analyses, the keyword families `dealsieve.diligence` already uses to match answers to
+    questions. Two items of one family from two documents are a conflict -- recorded, never
+    silently resolved -- and the later document's estimate is the one that counts. Two items of one
+    family inside a single report are left alone: one inspector pricing two roof lines is itemising,
+    not disagreeing.
     """
     merged: dict[str, CapexItem] = {}
+    sources: dict[str, str] = {}
+    families: dict[str, str | None] = {}
     conflicts: list[str] = []
     for analysis in sorted(analyses, key=lambda a: a.created_at):
         for item in analysis.capex_items:
             key = _capex_key(item.item)
+            family = capex_family(item.item)
             previous = merged.get(key)
-            if previous is not None and _item_amounts(previous) != _item_amounts(item):
-                conflicts.append(
-                    f"Capex '{item.item}': {previous.source_document} says "
-                    f"{_money(previous.low)}-{_money(previous.high)}, {item.source_document} says "
-                    f"{_money(item.low)}-{_money(item.high)}; the later document is used"
+            if previous is not None:
+                if _item_amounts(previous) != _item_amounts(item):
+                    conflicts.append(
+                        f"Capex '{item.item}': {previous.source_document} says "
+                        f"{_money(previous.low)}-{_money(previous.high)}, {item.source_document} "
+                        f"says {_money(item.low)}-{_money(item.high)}; the later document is used"
+                    )
+            elif family is not None:
+                twin = next(
+                    (
+                        other
+                        for other, other_family in families.items()
+                        if other_family == family and sources.get(other) != analysis.analysis_id
+                    ),
+                    None,
                 )
+                if twin is not None:
+                    previous = merged.pop(twin)
+                    sources.pop(twin, None)
+                    families.pop(twin, None)
+                    conflicts.append(
+                        f"Capex '{item.item}' and '{previous.item}' price the same work: "
+                        f"{previous.source_document} says {_money(previous.low)}-"
+                        f"{_money(previous.high)}, {item.source_document} says {_money(item.low)}-"
+                        f"{_money(item.high)}; the later document is used, they are not added"
+                    )
             merged[key] = item
+            sources[key] = analysis.analysis_id
+            families[key] = family
     return list(merged.values()), conflicts
+
+
+def apply_stored_capex(
+    session: ProcessingSession,
+    opportunity_id: str,
+    working: WorkingValues,
+    *,
+    extra: DocumentAnalysis | None = None,
+) -> tuple[Decimal, list[CapexItem], list[str]]:
+    """Recompute `immediate_capex`/`capex_items` from every stored analysis of the deal (S6, G2).
+
+    The basis is *derived* state: the union of the verified capex items across every analysis this
+    opportunity has, never a number carried along in the working values and hoped to be right.
+    Carrying it forward is not enough -- when the condition report arrives *before* the offering
+    (a real ordering: the report has no price, so `reconcile` raises `MissingInputs` and the
+    opportunity has no working values to attach $90,000 of roof work to), the later message rebuilt
+    the working values from its own claims and the capital work vanished from the basis.
+
+    `extra` is an analysis just written but possibly not yet readable back from the repository.
+
+    Returns the new total, the merged items, and any conflicts this recomputation added.
+    """
+    try:
+        stored = list(session.repo.list_document_analyses(opportunity_id))
+    except Exception:  # pragma: no cover - a repo that cannot list is not a reason to guess
+        logger.exception("could not list document analyses for %s", opportunity_id)
+        return Decimal(working.immediate_capex or 0), list(working.capex_items), []
+    if extra is not None and all(other.analysis_id != extra.analysis_id for other in stored):
+        stored.append(extra)  # pragma: no cover - a repo that does not read its own write back
+    items, conflicts = aggregate_capex_items(stored)
+    total = diligence_module().immediate_capex_from(items, session.policy)
+    new_conflicts = [c for c in conflicts if c not in working.conflicts]
+    working.immediate_capex = total
+    working.capex_items = items
+    working.conflicts = [*working.conflicts, *new_conflicts]
+    return total, items, new_conflicts
 
 
 def perform_analyze_document(
@@ -700,9 +992,7 @@ def perform_analyze_document(
     evidence = evidence_from_findings(analysis)
     if evidence:
         repo.store_evidence(opp.opportunity_id, evidence)
-    evidence_ids_by_topic = {
-        item.field.removeprefix("doc:"): [item.evidence_id] for item in evidence
-    }
+    evidence_ids_by_topic = {item.field.removeprefix("doc:"): [item.evidence_id] for item in evidence}
 
     session.append_event(
         EventType.DOCUMENT_ANALYZED,
@@ -734,32 +1024,64 @@ def perform_analyze_document(
             actor=actor,
         )
 
-    # --- answers: which of the open questions did this document settle? ----------------
-    matches = diligence.match_answers(open_requests, analysis)
+    # --- answers: which of the *asked* questions did this document settle? -------------
+    # F11: a request still in `draft` was never sent, so the broker cannot have answered it. The
+    # document's answer is kept -- it is on the stored analysis, and the topic is listed here -- but
+    # the request keeps its own status, and the question is dropped from the message that goes out
+    # rather than asking for something the record already holds.
+    asked = [r for r in open_requests if r.status in ANSWERABLE_REQUEST_STATUSES]
+    unsent = [r for r in open_requests if r.status not in ANSWERABLE_REQUEST_STATUSES]
+
+    matches = diligence.match_answers(asked, analysis)
     answered = diligence.apply_answers(
         matches, analysis, repo=repo, evidence_ids_by_topic=evidence_ids_by_topic
     )
     answered_topics = [r.topic for r in answered if r.status == "answered"]
-    still_open = [r.topic for r in open_requests if r.topic not in answered_topics]
 
-    # --- capex: the basis is every verified item this opportunity knows about (G2) ------
-    stored = list(repo.list_document_analyses(opp.opportunity_id))
-    if all(other.analysis_id != analysis.analysis_id for other in stored):  # pragma: no cover
-        stored.append(analysis)  # a repo that does not read its own write back
-    all_items, capex_conflicts = aggregate_capex_items(stored)
-    capex_total = diligence.immediate_capex_from(all_items, session.policy)
-
-    working = opp.working_values
-    if working is not None:
-        previous = Decimal(working.immediate_capex or 0)
-        new_conflicts = [c for c in capex_conflicts if c not in working.conflicts]
-        changed = (
-            capex_total != previous or list(working.capex_items) != all_items or bool(new_conflicts)
+    answered_before_asked: list[str] = []
+    for request, answer in diligence.match_answers(unsent, analysis):
+        if not answer.resolves:
+            continue
+        answered_before_asked.append(request.topic)
+        if request.topic not in session.answered_before_asked:
+            session.answered_before_asked.append(request.topic)
+        session.append_event(
+            EventType.NOTE,
+            f"answered before the request was sent: {request.topic}",
+            {
+                "request_id": request.request_id,
+                "request_status": request.status,
+                "topic": request.topic,
+                "answer": answer.answer,
+                "analysis_id": analysis.analysis_id,
+                "filename": analysis.filename,
+            },
+            actor=actor,
         )
-        working.immediate_capex = capex_total
-        working.capex_items = all_items
-        working.conflicts = [*working.conflicts, *new_conflicts]
-        if changed:
+
+    still_open = [
+        r.topic
+        for r in open_requests
+        if r.topic not in answered_topics and r.topic not in answered_before_asked
+    ]
+
+    # --- capex: the basis is every verified item this opportunity knows about (G2, S6) --
+    working = opp.working_values
+    if working is None:
+        # No working values to hold it yet (a report that arrived before any priced message). The
+        # analysis is stored, and the next `record_claims` folds it into the basis (F26).
+        stored = list(repo.list_document_analyses(opp.opportunity_id))
+        if all(other.analysis_id != analysis.analysis_id for other in stored):  # pragma: no cover
+            stored.append(analysis)
+        all_items, capex_conflicts = aggregate_capex_items(stored)
+        capex_total = diligence.immediate_capex_from(all_items, session.policy)
+    else:
+        previous = Decimal(working.immediate_capex or 0)
+        before_items = list(working.capex_items)
+        capex_total, all_items, capex_conflicts = apply_stored_capex(
+            session, opp.opportunity_id, working, extra=analysis
+        )
+        if capex_total != previous or before_items != all_items or capex_conflicts:
             repo.save_opportunity(opp)
         if capex_total != previous:
             session.append_event(
@@ -769,7 +1091,7 @@ def perform_analyze_document(
                     "from": str(previous),
                     "to": str(capex_total),
                     "source_document": analysis.filename,
-                    "analyses": len(stored),
+                    "analyses": len(repo.list_document_analyses(opp.opportunity_id)),
                     "items": [
                         {
                             "item": i.item,
@@ -780,7 +1102,7 @@ def perform_analyze_document(
                         }
                         for i in all_items
                     ],
-                    "conflicts": new_conflicts,
+                    "conflicts": capex_conflicts,
                 },
                 actor=actor,
             )
@@ -794,6 +1116,7 @@ def perform_analyze_document(
         "findings": len(analysis.findings),
         "images_reviewed": analysis.images_reviewed,
         "answered_topics": answered_topics,
+        "answered_before_asked": answered_before_asked,
         "still_open_topics": still_open,
         "immediate_capex": str(capex_total),
         "capex_items": [i.item for i in all_items],
@@ -805,6 +1128,66 @@ def perform_analyze_document(
 
 
 # --------------------------------------------------------------------------- underwrite
+
+
+def record_underwriting_run(
+    session: ProcessingSession,
+    run: UnderwritingResult,
+    opp: Opportunity,
+    *,
+    actor: Actor = Actor.AGENT,
+) -> None:
+    """Store the run and its `UNDERWRITING_COMPLETED` event, in one transaction where possible.
+
+    F17: written as two commits, a crash between them leaves a run with no event and breaks S1's
+    count equality on re-read. `Repo.record_underwriting(run, event)` does both inside one
+    `BEGIN IMMEDIATE`; a repository without it keeps the two-step path.
+    """
+    viability = run.viability
+    event = OpportunityEvent(
+        opportunity_id=opp.opportunity_id,
+        type=EventType.UNDERWRITING_COMPLETED,
+        actor=actor,
+        source_message_id=session.message.message_id,
+        summary=f"Underwritten at {_money(run.inputs.asking_price)}: {run.failure_summary}",
+        payload={
+            "run_id": run.run_id,
+            "status": run.status.value,
+            "normalized_cap": str(run.normalized.normalized_cap_rate),
+            "dscr": str(run.financing.dscr),
+            "max_viable_price": str(viability.max_viable_price)
+            if viability.max_viable_price is not None
+            else None,
+            "failure_summary": run.failure_summary,
+        },
+    )
+    combined = getattr(session.repo, "record_underwriting", None)
+    if callable(combined):
+        stored = combined(run, event)
+        session.register_event(stored if isinstance(stored, OpportunityEvent) else event)
+        return
+    session.repo.store_underwriting_run(run)
+    session.register_event(session.repo.append_event(event))
+
+
+def reusable_run(session: ProcessingSession, opp: Opportunity) -> UnderwritingResult | None:
+    """The stored run this retry can reuse, or None when it must underwrite again (F13).
+
+    Reusable means: this message was already recorded, the opportunity already has a latest run,
+    and that run's inputs are exactly the working values it would be handed now. Anything that
+    actually moved -- capex from a document analysed on the retry, a reconciled price -- makes the
+    inputs differ and a fresh run is produced, because that is a real condition change.
+    """
+    if not session.replayed_message or not opp.latest_run_id:
+        return None
+    try:
+        existing = session.repo.get_underwriting_run(opp.latest_run_id)
+    except Exception:  # pragma: no cover - defensive
+        logger.exception("could not read run %s", opp.latest_run_id)
+        return None
+    if existing is None or existing.inputs != opp.working_values:
+        return None
+    return existing
 
 
 def perform_underwrite(session: ProcessingSession, *, actor: Actor = Actor.AGENT) -> dict[str, Any]:
@@ -832,54 +1215,52 @@ def perform_underwrite(session: ProcessingSession, *, actor: Actor = Actor.AGENT
     if opp.working_values is None:
         return {"error": "no working values for this opportunity; record_claims must succeed first"}
 
-    if opp.latest_run_id and session.run_before is None:
+    reused = reusable_run(session, opp)
+
+    if reused is None and opp.latest_run_id and session.run_before is None:
         session.run_before = repo.get_underwriting_run(opp.latest_run_id)
 
-    run = run_underwriting(
-        opp.working_values,
-        session.policy,
-        opportunity_id=opp.opportunity_id,
-        trigger_event_id=session.last_event_id,
-    )
-    repo.store_underwriting_run(run)
-    repo.record_policy_version(
-        session.policy.policy_version, session.policy.name, _policy_yaml(session.policy)
-    )
+    previous = opp.status
+    if reused is not None:
+        # F13: a retry of a message whose working values did not move reuses its own run rather
+        # than minting a second immutable one for the same message.
+        run = reused
+    else:
+        run = run_underwriting(
+            opp.working_values,
+            session.policy,
+            opportunity_id=opp.opportunity_id,
+            trigger_event_id=session.last_event_id,
+        )
+        record_underwriting_run(session, run, opp, actor=actor)
+        try:
+            repo.record_policy_version(
+                session.policy.policy_version, session.policy.name, _policy_yaml(session.policy)
+            )
+        except Exception as exc:  # archiving the policy body must not cost a recorded run
+            logger.exception("could not archive policy %s", session.policy.policy_version)
+            session.errors.append(
+                f"policy version {session.policy.policy_version} was not archived: "
+                f"{type(exc).__name__}: {exc}"
+            )
+
+        if run.status != previous:
+            session.append_event(
+                EventType.STATUS_CHANGED,
+                f"{previous.value} -> {run.status.value}",
+                {"from": previous.value, "to": run.status.value},
+                actor=actor,
+            )
+            opp.previous_status = previous
+
+        opp.status = run.status
+        opp.latest_run_id = run.run_id
+        opp.viability = run.viability
+        opp.reason_summary = run.failure_summary
+        opp.human_attention_required = run.status == OpportunityStatus.REVIEW
+        repo.save_opportunity(opp)
 
     viability = run.viability
-    session.append_event(
-        EventType.UNDERWRITING_COMPLETED,
-        f"Underwritten at {_money(opp.working_values.asking_price)}: {run.failure_summary}",
-        {
-            "run_id": run.run_id,
-            "status": run.status.value,
-            "normalized_cap": str(run.normalized.normalized_cap_rate),
-            "dscr": str(run.financing.dscr),
-            "max_viable_price": str(viability.max_viable_price)
-            if viability.max_viable_price is not None
-            else None,
-            "failure_summary": run.failure_summary,
-        },
-        actor=actor,
-    )
-
-    previous = opp.status
-    if run.status != previous:
-        session.append_event(
-            EventType.STATUS_CHANGED,
-            f"{previous.value} -> {run.status.value}",
-            {"from": previous.value, "to": run.status.value},
-            actor=actor,
-        )
-        opp.previous_status = previous
-
-    opp.status = run.status
-    opp.latest_run_id = run.run_id
-    opp.viability = viability
-    opp.reason_summary = run.failure_summary
-    opp.human_attention_required = run.status == OpportunityStatus.REVIEW
-    repo.save_opportunity(opp)
-
     session.run_after = run
 
     # Latches: set once, never cleared within a message (R5).
@@ -925,6 +1306,10 @@ def perform_underwrite(session: ProcessingSession, *, actor: Actor = Actor.AGENT
         "threshold_lost": session.threshold_lost,
         "next_step": next_step,
     }
+    if reused is not None:
+        result["reused_run"] = True
+        result["note"] = "this message was already underwritten; the same run is reused, no new run"
+
     session.underwrite_result = result
     session.phase_advance("underwrite")
     return result
@@ -949,6 +1334,30 @@ def perform_skeptic_review(session: ProcessingSession, *, actor: Actor = Actor.A
     reason = session.phase_check("request_skeptic_review")
     if reason:
         return {"skipped": reason}
+
+    replayed = stored_report_for_run(session)
+    if replayed is not None:
+        # F13: this message already had its skeptic review; a retry reuses that report rather than
+        # paying for a second model call and appending a second SKEPTIC_REVIEW_COMPLETED. The
+        # diligence chase downstream still runs if the first attempt never got that far.
+        session.skeptic_report = replayed
+        session.phase_advance("request_skeptic_review")
+        return {
+            "report_id": replayed.report_id,
+            "verdict": replayed.verdict,
+            "summary": replayed.summary,
+            "reused": True,
+            "concerns": [
+                {
+                    "topic": c.topic,
+                    "severity": c.severity,
+                    "evidence_status": c.evidence_status,
+                    "why_it_matters": c.why_it_matters,
+                }
+                for c in replayed.concerns
+            ],
+            "suggested_questions": suggested_questions(replayed),
+        }
 
     report = run_skeptic(session)
     session.repo.store_skeptic_report(report)
@@ -983,6 +1392,18 @@ def perform_skeptic_review(session: ProcessingSession, *, actor: Actor = Actor.A
         ],
         "suggested_questions": suggested_questions(report),
     }
+
+
+def stored_report_for_run(session: ProcessingSession) -> SkepticReport | None:
+    """The skeptic report this message already produced, when it is being retried (F13)."""
+    if not session.replayed_message or session.run_after is None or session.opportunity_id is None:
+        return None
+    try:
+        stored = session.repo.list_skeptic_reports(session.opportunity_id)
+    except Exception:  # pragma: no cover - defensive
+        logger.exception("could not list skeptic reports for %s", session.opportunity_id)
+        return None
+    return next((r for r in stored if r.run_id == session.run_after.run_id), None)
 
 
 def suggested_questions(report: SkepticReport | None) -> list[str]:
@@ -1094,9 +1515,7 @@ def reconcile_diligence_items(
     derived = diligence_items_from(report)
     if not derived:
         return [], [{**item, "reason": "the skeptic raised no chaseable concern"} for item in proposed]
-    accepted = [
-        item for item in derived if any(diligence_items_match(p, item) for p in proposed)
-    ]
+    accepted = [item for item in derived if any(diligence_items_match(p, item) for p in proposed)]
     dropped = [
         {**item, "reason": "no matching concern in this message's skeptic report"}
         for item in proposed
@@ -1134,6 +1553,12 @@ def perform_request_diligence(
                 "concerns, so call request_skeptic_review first"
             )
         }
+    if session.replayed_message and EventType.DILIGENCE_REQUESTED in session.event_types_created:
+        # F13: the first attempt already asked the broker. A retry chases the same answers, so it
+        # would be a second identical set of requests and a second approval button.
+        return {
+            "skipped": "this message already raised its diligence requests; a retry does not ask twice"
+        }
 
     proposed = [
         {
@@ -1152,7 +1577,9 @@ def perform_request_diligence(
 
     diligence = diligence_module()
     requests = diligence.build_requests(
-        opp.opportunity_id, cleaned, source=session.skeptic_report.report_id if session.skeptic_report else None
+        opp.opportunity_id,
+        cleaned,
+        source=session.skeptic_report.report_id if session.skeptic_report else None,
     )
     if not requests:
         return {"skipped": "every item duplicated an existing request"}
@@ -1174,6 +1601,9 @@ def perform_request_diligence(
     session.draft = draft
     if draft.status != "sent":
         session.pending_request = draft
+    # R5/F1: one chase per message. Without this the tool was repeatable without limit and three
+    # calls produced three identical requests and three approval buttons.
+    session.phase_advance("request_diligence")
 
     session.append_event(
         EventType.DILIGENCE_REQUESTED,
@@ -1222,6 +1652,25 @@ def suggested_credit(current_price: Decimal, max_viable_price: Decimal) -> Decim
     return Decimal(math.ceil(gap / CREDIT_ROUNDING)) * CREDIT_ROUNDING
 
 
+def existing_credit_draft(session: ProcessingSession) -> OutboundDraft | None:
+    """The credit request this message already produced, when it is being retried (F13)."""
+    if session.opportunity_id is None:  # pragma: no cover - defensive
+        return None
+    try:
+        drafts = session.repo.list_drafts(opportunity_id=session.opportunity_id)
+    except Exception:  # pragma: no cover - defensive
+        logger.exception("could not list drafts for %s", session.opportunity_id)
+        return None
+    return next(
+        (
+            d
+            for d in drafts
+            if d.kind == "credit_request" and d.in_reply_to_message_id == session.message.message_id
+        ),
+        None,
+    )
+
+
 def perform_request_price_adjustment(
     session: ProcessingSession,
     amount: Decimal | int | float | str | None = None,
@@ -1245,6 +1694,15 @@ def perform_request_price_adjustment(
     run = session.run_after
     if run is None:
         return {"skipped": "underwrite has not run for this message"}
+
+    if session.replayed_message and existing_credit_draft(session) is not None:
+        # F13: money is never drafted twice for one message, however often it is retried.
+        return {"skipped": "this message already produced a credit request; a retry does not draft it again"}
+
+    if getattr(run.viability, "no_viable_price", False):
+        # F18: no purchase price in range clears the economic gates, so there is no credit to ask
+        # for -- the deal is not expensive, it does not work at any price.
+        return {"skipped": f"no purchase price fixes this deal: {run.failure_summary}"}
 
     frontier = run.viability.max_viable_price
     # A credit request needs something that happened in THIS message to justify it: the deal fell out
@@ -1292,7 +1750,8 @@ def perform_request_price_adjustment(
     draft = diligence.compose_credit_request(
         opp,
         used,
-        rationale or f"Immediate capital work established by diligence moves the viable price to {_money(frontier)}.",
+        rationale
+        or f"Immediate capital work established by diligence moves the viable price to {_money(frontier)}.",
         session.policy,
         in_reply_to=session.message.message_id,
     )
@@ -1302,6 +1761,8 @@ def perform_request_price_adjustment(
     session.credit_draft = draft
     if session.draft is None:
         session.draft = draft
+    # R5/F1: one credit request per message; a second call is refused by `phase_check` above.
+    session.phase_advance("request_price_adjustment")
 
     return {
         "draft_id": draft.draft_id,
@@ -1348,9 +1809,7 @@ def build_alert(session: ProcessingSession, opp: Opportunity, kind: str) -> Noti
 
     if _accepts(format_threshold_alert, "pending_request"):
         extra["pending_request"] = session.pending_request
-    return format_threshold_alert(
-        opp, session.run_before, session.run_after, session.skeptic_report, **extra
-    )
+    return format_threshold_alert(opp, session.run_before, session.run_after, session.skeptic_report, **extra)
 
 
 def find_notification(session: ProcessingSession, dedupe_key: str) -> Notification | None:
@@ -1409,13 +1868,49 @@ def deliver_notification(
             logger.exception("could not record the delivery failure as an event")
         raise
 
+    # The human has now seen it. Everything from here is bookkeeping, and bookkeeping that fails
+    # must not turn into a second interruption (F6): the row is left saying "we tried", and the
+    # resume step would have sent the very same alert again in this same run.
     notification.delivered = True
     notification.delivery_ref = delivery_ref
-    session.repo.update_notification(notification)
     session.notification = notification
     session.undelivered_notification = None
-    session.notification_error = None
 
+    recorded = True
+    try:
+        session.repo.update_notification(notification)
+    except Exception as exc:
+        recorded = False
+        error = (
+            f"notification delivered but not recorded: {type(exc).__name__}: {exc}; "
+            f"delivery_ref {delivery_ref}"
+        )
+        logger.exception("could not record delivery of %s", notification.notification_id)
+        # The message is marked failed with this reason (the record disagrees with reality and a
+        # human should know), but `delivered=True` in memory keeps this run from re-sending.
+        session.notification_error = error
+        try:
+            session.append_event(
+                EventType.NOTE,
+                f"{error}; the human was interrupted, the stored row says otherwise",
+                {
+                    "notification_id": notification.notification_id,
+                    "dedupe_key": notification.dedupe_key,
+                    "kind": kind,
+                    "delivered": True,
+                    "recorded": False,
+                    "delivery_ref": delivery_ref,
+                    "error": error,
+                },
+                actor=actor,
+            )
+        except Exception:  # pragma: no cover - repo failure during error handling
+            logger.exception("could not record the bookkeeping failure as an event")
+    else:
+        session.notification_error = None
+
+    # The interruption happened, so the timeline says so either way; `recorded` is how the reader
+    # tells "and the row agrees" from "and the row could not be updated".
     session.append_event(
         EventType.HUMAN_NOTIFIED,
         f"Human notified: {notification.title}",
@@ -1425,6 +1920,7 @@ def deliver_notification(
             "dedupe_key": notification.dedupe_key,
             "channel": notification.channel.value,
             "delivered": True,
+            "recorded": recorded,
             "delivery_ref": delivery_ref,
             "note": note,
         },
@@ -1435,6 +1931,7 @@ def deliver_notification(
         "notification_id": notification.notification_id,
         "kind": kind,
         "delivered": True,
+        "recorded": recorded,
         "delivery_ref": delivery_ref,
         "channel": notification.channel.value,
         "title": notification.title,
@@ -1448,6 +1945,7 @@ def resume_undelivered_notifications(
 
     The dedupe row means "we tried", not "the human knows". A re-run of the message -- or the next
     message on the deal -- finishes the delivery it started rather than treating it as handled.
+    A row that already carries a `delivery_ref` is skipped: that one *did* reach the human (F6).
     """
     if session.opportunity_id is None:
         return {"resumed": 0}
@@ -1457,8 +1955,10 @@ def resume_undelivered_notifications(
         logger.exception("could not list notifications for %s", session.opportunity_id)
         return {"resumed": 0}
 
+    # F6: a row that carries a `delivery_ref` already went out -- the notifier returned and only
+    # the bookkeeping fell over. Re-sending it would interrupt the human twice for one crossing.
     resumed: list[str] = []
-    for notification in [n for n in stored if not n.delivered]:
+    for notification in [n for n in stored if not n.delivered and not n.delivery_ref]:
         deliver_notification(
             session,
             notification,
@@ -1687,6 +2187,7 @@ def make_tools(session: ProcessingSession) -> list[Any]:
 
 
 __all__ = [
+    "ANSWERABLE_REQUEST_STATUSES",
     "CREDIT_ROUNDING",
     "CREDIT_TOLERANCE",
     "DILIGENCE_MATCH_THRESHOLD",
@@ -1697,7 +2198,10 @@ __all__ = [
     "DiligenceItem",
     "ProcessingSession",
     "aggregate_capex_items",
+    "apply_stored_capex",
     "build_alert",
+    "capex_families",
+    "capex_family",
     "capex_rejection_reason",
     "deliver_notification",
     "diligence_items_from",
@@ -1705,11 +2209,14 @@ __all__ = [
     "diligence_module",
     "document_amounts",
     "duplicate_notification_error",
+    "events_for_message",
     "evidence_from_findings",
+    "existing_credit_draft",
     "find_attachment",
     "find_notification",
     "finding_location",
     "make_tools",
+    "message_already_recorded",
     "perform_analyze_document",
     "perform_notify_human",
     "perform_record_claims",
@@ -1718,7 +2225,10 @@ __all__ = [
     "perform_skeptic_review",
     "perform_underwrite",
     "reconcile_diligence_items",
+    "record_underwriting_run",
     "resume_undelivered_notifications",
+    "reusable_run",
+    "stored_report_for_run",
     "suggested_credit",
     "suggested_questions",
     "verify_capex_items",

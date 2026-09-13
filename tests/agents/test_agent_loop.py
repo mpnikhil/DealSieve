@@ -152,9 +152,12 @@ def test_script_02_crosses_into_review_and_interrupts_exactly_once(
     assert draft.status == "pending" and len(draft.questions) == 3
     assert len(fake_repo.list_diligence_requests(outcome.opportunity_id)) == 3
     assert any(action.action == "approve" for action in recording_notifier.sent[0].actions)
-    # The inbound message's subject is already a reply ("Re: Off-market"); the draft must not
-    # double the prefix into "Re: Re: Off-market".
-    assert draft.subject == "Re: Off-market"
+    # W21/F4: the outbound subject is composed from the deal, never echoed from the broker's --
+    # a broker subject carries the price ("... $1.55M / 8.13% cap"), and the money screen never
+    # saw it. No "Re:" is added either, so no thread can end up "Re: Re: Off-market".
+    opp = fake_repo.get_opportunity(outcome.opportunity_id)
+    assert draft.subject == f"Diligence questions: {opp.display_name}"
+    assert not draft.subject.startswith("Re:")
 
 
 def test_a_second_message_on_the_same_opportunity_does_not_recreate_it(

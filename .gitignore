@@ -29,3 +29,5 @@ frontend/dist/
 .bedrock_agentcore/
 data/documents/
 data/outbox/
+# demo production pipeline, narration, voice reference, generated media: private, never committed
+demo/

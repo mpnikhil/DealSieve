@@ -147,7 +147,9 @@ def _resolve_provenance_and_conflicts(
         # independent of whether the top-level claim field agrees with the winner.
         distinct_values = {repr(i.value) for i in items}
         if len(distinct_values) > 1:
-            detail = ", ".join(f"{i.value!r} (conf {i.confidence:.2f} from {i.source_document})" for i in items)
+            detail = ", ".join(
+                f"{i.value!r} (conf {i.confidence:.2f} from {i.source_document})" for i in items
+            )
             conflicts.append(
                 f"{field_name}: conflicting values among sources this message -- {detail} "
                 f"-- kept {winner.value!r} from {winner.source_document}"
@@ -192,7 +194,9 @@ def _price_restated_without_change(claims: ExtractedClaims) -> bool:
     return all("subject" in (e.location or "").lower() for e in price_evidence)
 
 
-def reconcile(existing: WorkingValues | None, claims: ExtractedClaims) -> tuple[WorkingValues, list[DetectedChange]]:
+def reconcile(
+    existing: WorkingValues | None, claims: ExtractedClaims
+) -> tuple[WorkingValues, list[DetectedChange]]:
     provenance, conflicts, evidence_overrides = _resolve_provenance_and_conflicts(
         claims,
         existing.provenance if existing else {},

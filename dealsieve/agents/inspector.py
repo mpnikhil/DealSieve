@@ -210,7 +210,11 @@ def build_content_blocks(
 ) -> list[dict[str, Any]]:
     """The Strands multimodal user message: one text block, then "image N" + image, per photo."""
     blocks: list[dict[str, Any]] = [
-        {"text": build_inspector_prompt(attachment, open_requests, image_count=len(images), text_cap=text_cap)}
+        {
+            "text": build_inspector_prompt(
+                attachment, open_requests, image_count=len(images), text_cap=text_cap
+            )
+        }
     ]
     for index, (_path, fmt, data) in enumerate(images, start=1):
         blocks.append({"text": f"image {index}"})

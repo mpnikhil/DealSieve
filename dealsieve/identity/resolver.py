@@ -85,9 +85,7 @@ def _norm_city(city: str | None) -> str | None:
 
 
 def extract_identity_keys(message: InboundMessage, claims: ExtractedClaims) -> IdentityKeys:
-    normalized_address = normalize_address(
-        claims.address_line, claims.city, claims.state, claims.postal_code
-    )
+    normalized_address = normalize_address(claims.address_line, claims.city, claims.state, claims.postal_code)
     listing_url = claims.listing_url
     if not listing_url and message.urls:
         listing_url = message.urls[0]

@@ -17,7 +17,13 @@ from __future__ import annotations
 from decimal import Decimal
 
 from dealsieve.policy import InvestmentPolicy
-from dealsieve.schemas import GateResult, OpportunityStatus, UnderwritingResult, WorkingValues
+from dealsieve.schemas import (
+    GateResult,
+    OpportunityStatus,
+    UnderwritingResult,
+    ViabilityFrontier,
+    WorkingValues,
+)
 from dealsieve.underwriting.classify import classify
 from dealsieve.underwriting.compare import broker_vs_dealsieve
 from dealsieve.underwriting.financing import _compute_financing
@@ -40,6 +46,9 @@ def _failure_summary(
     gates: list[GateResult],
     price: Decimal,
     immediate_capex: Decimal,
+    *,
+    viability: ViabilityFrontier | None = None,
+    noi: Decimal | None = None,
 ) -> str:
     failed = {gate.gate: gate for gate in gates if not gate.passed}
     if status == OpportunityStatus.DEAD:
@@ -47,13 +56,17 @@ def _failure_summary(
         largest = failed.get("largest_tenant_pct_max")
         if largest is not None:
             parts.append(
-                f"largest tenant {_percent(Decimal(largest.actual))} > "
-                f"{_percent(Decimal(largest.threshold))}"
+                f"largest tenant {_percent(Decimal(largest.actual))} > {_percent(Decimal(largest.threshold))}"
             )
         tenants = failed.get("tenant_count_min")
         if tenants is not None:
             parts.append(f"{tenants.actual} tenants < {tenants.threshold}")
         return "Structural: " + ", ".join(parts)
+    if viability is not None and viability.no_viable_price:
+        # F18: the frontier solver found no price at all that clears the economic gates. Saying
+        # "fails on valuation" would imply a cheaper price fixes it; nothing does.
+        stated_noi = "" if noi is None else f" (NOI {_money(noi)})"
+        return f"No purchase price passes the economic gates{stated_noi}"
     if status == OpportunityStatus.REVIEW:
         return f"Passes all gates at {_money(price)}"
 
@@ -61,10 +74,7 @@ def _failure_summary(
     cap = failed.get("min_normalized_cap_rate")
     if cap is not None:
         cap_label = "cap" if immediate_capex > 0 else "normalized cap"
-        parts.append(
-            f"{cap_label} {_percent(Decimal(cap.actual))} < "
-            f"{_percent(Decimal(cap.threshold))}"
-        )
+        parts.append(f"{cap_label} {_percent(Decimal(cap.actual))} < {_percent(Decimal(cap.threshold))}")
     dscr = failed.get("min_base_dscr")
     if dscr is not None:
         parts.append(f"DSCR {Decimal(dscr.actual):.2f}x < {Decimal(dscr.threshold):.2f}x")
@@ -76,9 +86,7 @@ def _failure_summary(
         else:
             ltv_actual = _percent(Decimal(ltv.actual))
             ltv_threshold = _percent(Decimal(ltv.threshold))
-        parts.append(
-            f"LTV {ltv_actual} > {ltv_threshold}"
-        )
+        parts.append(f"LTV {ltv_actual} > {ltv_threshold}")
     absolute = failed.get("absolute_max_price")
     if absolute is not None:
         parts.append(f"price {_money(Decimal(absolute.actual))} > {_money(Decimal(absolute.threshold))}")
@@ -138,5 +146,12 @@ def run_underwriting(
         status=status,
         viability=viability,
         comparison=broker_vs_dealsieve(values, normalized, financing),
-        failure_summary=_failure_summary(status, gates, price, values.immediate_capex),
+        failure_summary=_failure_summary(
+            status,
+            gates,
+            price,
+            values.immediate_capex,
+            viability=viability,
+            noi=normalized.noi,
+        ),
     )

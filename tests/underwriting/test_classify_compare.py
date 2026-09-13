@@ -125,3 +125,32 @@ def test_comparison_adds_capex_and_all_in_basis_rows(demo_values, policy):
     assert by_metric["Immediate capex"].dealsieve == "$90,000"
     assert by_metric["All-in basis"].broker == "$1,550,000"
     assert by_metric["All-in basis"].dealsieve == "$1,640,000"
+
+
+def test_no_viable_price_is_watched_not_near_and_not_dead(policy):
+    """F18: no economic price exists, but nothing structural failed -- WATCH, with no frontier."""
+    frontier = ViabilityFrontier(
+        current_price=Decimal("100"),
+        max_viable_price=None,
+        distance_pct=None,
+        no_viable_price=True,
+    )
+    gates = [
+        _gate(kind=ConstraintKind.STRUCTURAL, passed=True),
+        _gate(kind=ConstraintKind.ECONOMIC, passed=False),
+    ]
+
+    assert classify(gates, frontier, Decimal("100"), policy) == OpportunityStatus.WATCH
+
+
+def test_a_structural_failure_still_outranks_the_no_viable_price_flag(policy):
+    frontier = ViabilityFrontier(
+        current_price=Decimal("100"),
+        max_viable_price=None,
+        distance_pct=None,
+        no_viable_price=True,
+        structural_failures=["tenant_count_min"],
+    )
+    gates = [_gate(kind=ConstraintKind.STRUCTURAL, passed=False)]
+
+    assert classify(gates, frontier, Decimal("100"), policy) == OpportunityStatus.DEAD

@@ -30,9 +30,7 @@ def selected_backend() -> str:
     """The backend named by DEALSIEVE_MODEL_BACKEND (default: cli)."""
     backend = (_env("DEALSIEVE_MODEL_BACKEND", DEFAULT_BACKEND) or DEFAULT_BACKEND).lower()
     if backend not in VALID_BACKENDS:
-        raise ValueError(
-            f"DEALSIEVE_MODEL_BACKEND={backend!r} is not one of {', '.join(VALID_BACKENDS)}"
-        )
+        raise ValueError(f"DEALSIEVE_MODEL_BACKEND={backend!r} is not one of {', '.join(VALID_BACKENDS)}")
     return backend
 
 

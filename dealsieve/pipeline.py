@@ -3,9 +3,10 @@
 `process_inbound(message, *, repo, policy, notifier, outbox=None, script=None) -> ProcessingOutcome`
 
 1. **Claim the message (R4).** `repo.claim_message` atomically inserts it, or re-claims a row left
-   `failed`/`processing` by an earlier crash. It returns False only for messages that actually
-   *completed*, and only those get the duplicate outcome. Message existence is not completion: a
-   crash halfway through used to mark a deal permanently processed with no underwriting run.
+   `failed`/`processing` by an earlier crash, and says which of `claimed | completed | in_flight`
+   happened. Only `completed` is a duplicate; `in_flight` says another worker holds the lease right
+   now and gets its own summary. Message existence is not completion: a crash halfway through used
+   to mark a deal permanently processed with no underwriting run.
 2. Build a `ProcessingSession` and run the Strands acquisition agent over the rendered message. The
    agent extracts claims and calls tools; the tools do every deterministic thing and append events.
 3. **Safety net (actor=SYSTEM).** Whatever the model forgot, do here: underwrite after any document
@@ -18,7 +19,9 @@
    A message that ends with a stored-but-undelivered alert is marked *failed*, not completed, and a
    re-run resumes that delivery (the safety net's last step) instead of treating the dedupe row as
    proof the human was told.
-6. Mark the message completed or failed, and return the outcome. `process_inbound` never raises.
+6. Mark the message completed or failed, and return the outcome. `process_inbound` never raises --
+   the claim, the backend name and the session construction are inside the guard too, so a bad
+   `DEALSIEVE_OUTBOX` or a locked database returns an outcome and marks the row failed (L4).
 """
 
 from __future__ import annotations
@@ -74,16 +77,30 @@ def _resolve_outbox(outbox: Outbox | None) -> Outbox | None:
     return get_outbox()
 
 
-def _claim(repo: Repo, message: InboundMessage) -> bool:
-    """R4. False only when this message already completed."""
+#: What a claim attempt concluded. "claimed" is the only one that processes the message.
+CLAIM_STATES = ("claimed", "completed", "in_flight")
+
+
+def _claim(repo: Repo, message: InboundMessage) -> str:
+    """R4. One of `CLAIM_STATES`.
+
+    `Repo.claim_message` returns the tri-state directly (F14); a repository that still returns a
+    bool is read the old way, where False can only mean "completed".
+    """
     claim = getattr(repo, "claim_message", None)
     if claim is not None:
-        return bool(claim(message))
+        outcome = claim(message)
+        if isinstance(outcome, bool):
+            return "claimed" if outcome else "completed"
+        state = str(getattr(outcome, "value", outcome)).strip().lower()
+        if state in CLAIM_STATES:
+            return state
+        return "claimed" if outcome else "completed"
     # Pre-R4 repositories have no processing state: fall back to plain existence.
     if repo.message_exists(message.message_id):
-        return False
+        return "completed"
     repo.store_inbound_message(message)
-    return True
+    return "claimed"
 
 
 def _finish(repo: Repo, message_id: str, *, error: str | None) -> None:
@@ -101,19 +118,54 @@ def _finish(repo: Repo, message_id: str, *, error: str | None) -> None:
         logger.exception("could not record the processing state of %s", message_id)
 
 
-def _duplicate_outcome(message: InboundMessage, repo: Repo, backend: str) -> ProcessingOutcome:
+def _not_claimed_outcome(message: InboundMessage, repo: Repo, backend: str, state: str) -> ProcessingOutcome:
+    """The outcome for a message this worker must not process.
+
+    Two different facts used to share one summary (F14): a message that is *finished*, and one
+    another worker is *in the middle of*. Only the first means "nothing more will happen".
+    """
     opportunity_id = repo.find_opportunity_id_by_message_id(message.message_id)
     status = None
     if opportunity_id:
         opp = repo.get_opportunity(opportunity_id)
         status = opp.status if opp else None
+    if state == "in_flight":
+        summary = f"message {message.message_id} is being processed by another worker; nothing re-run"
+    else:
+        summary = f"duplicate message {message.message_id}; already processed, nothing re-run"
     return ProcessingOutcome(
         message_id=message.message_id,
         opportunity_id=opportunity_id,
         created_opportunity=False,
         status_before=status,
         status_after=status,
-        summary=f"duplicate message {message.message_id}; already processed, nothing re-run",
+        summary=summary,
+        model_backend=backend,
+    )
+
+
+def _startup_failure(message: InboundMessage, repo: Repo, backend: str, error: str) -> ProcessingOutcome:
+    """L4: the pipeline never raises, not even before the session exists (F23).
+
+    `backend_name()`, the claim and the session construction (which resolves the outbox, which
+    loads the policy) can all raise. When a row exists for the message it is marked failed, so the
+    message stays retryable rather than being stranded in `processing` with nobody owning it.
+    """
+    logger.exception("process_inbound could not start for %s", message.message_id)
+    try:
+        exists = repo.message_exists(message.message_id)
+    except Exception:  # pragma: no cover - a repo that cannot be read cannot be marked either
+        logger.exception("could not check whether %s is stored", message.message_id)
+        exists = False
+    if exists:
+        _finish(repo, message.message_id, error=error)
+    return ProcessingOutcome(
+        message_id=message.message_id,
+        opportunity_id=None,
+        created_opportunity=False,
+        status_before=None,
+        status_after=None,
+        summary=error,
         model_backend=backend,
     )
 
@@ -167,7 +219,10 @@ def _safety_net(session: ProcessingSession) -> list[str]:
         elif "error" not in result:
             actions.append("skeptic review run by safety net")
 
-    if session.threshold_crossed and not session.diligence_requests:
+    # F21/L2: any skeptic report in this message with chaseable concerns owes the broker a
+    # question -- not only one produced by a crossing. A second message on a deal that is
+    # *already* in REVIEW raises a report full of missing evidence too, and nothing else chases it.
+    if session.skeptic_report is not None and not session.diligence_requests:
         items = diligence_items_from(session.skeptic_report)
         if items:
             result = _isolated(
@@ -243,20 +298,23 @@ def process_inbound(
     `outbox` defaults to `dealsieve.outbound.get_outbox()`; `script` is the path to a
     `fixtures/scripted/*.json` file and is only meaningful when `DEALSIEVE_MODEL_BACKEND=scripted`.
     """
-    backend = backend_name()
-
-    if not _claim(repo, message):
-        return _duplicate_outcome(message, repo, backend)
-
-    session = ProcessingSession(
-        repo=repo,
-        policy=policy,
-        notifier=notifier,
-        message=message,
-        model_backend=backend,
-        script=script,
-        outbox=_resolve_outbox(outbox),
-    )
+    backend = "unknown"
+    try:
+        backend = backend_name()
+        state = _claim(repo, message)
+        if state != "claimed":
+            return _not_claimed_outcome(message, repo, backend, state)
+        session = ProcessingSession(
+            repo=repo,
+            policy=policy,
+            notifier=notifier,
+            message=message,
+            model_backend=backend,
+            script=script,
+            outbox=_resolve_outbox(outbox),
+        )
+    except Exception as exc:  # F23: the claim, the backend and the outbox can all raise
+        return _startup_failure(message, repo, backend, f"{type(exc).__name__}: {exc}")
 
     summary = ""
     fatal: str | None = None

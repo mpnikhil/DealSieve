@@ -47,9 +47,7 @@ def _gates_at(
 
 def _economic_passes(values: WorkingValues, policy: InvestmentPolicy, price: Decimal) -> bool:
     return all(
-        gate.passed
-        for gate in _gates_at(values, policy, price)
-        if gate.kind == ConstraintKind.ECONOMIC
+        gate.passed for gate in _gates_at(values, policy, price) if gate.kind == ConstraintKind.ECONOMIC
     )
 
 
@@ -61,9 +59,7 @@ def solve_max_viable_price(
     current_price = values.asking_price
     current_gates = _gates_at(values, policy, current_price)
     structural_failures = [
-        gate.gate
-        for gate in current_gates
-        if gate.kind == ConstraintKind.STRUCTURAL and not gate.passed
+        gate.gate for gate in current_gates if gate.kind == ConstraintKind.STRUCTURAL and not gate.passed
     ]
     if structural_failures:
         return ViabilityFrontier(
@@ -76,10 +72,21 @@ def solve_max_viable_price(
     lower = MONEY
     upper = policy.purchase.absolute_max
     if not _economic_passes(values, policy, lower):
+        # No price in (0.01, absolute_max] passes the economic gates -- NOI <= 0 is the usual cause
+        # -- and yet nothing structural failed. That is its own outcome, not an ordinary WATCH whose
+        # frontier the caller simply has not been handed, so it is flagged rather than left blank
+        # (F18). `paths` stays empty and `distance_pct` None: no price change fixes this deal.
         return ViabilityFrontier(
             current_price=current_price.quantize(MONEY, rounding=ROUND_HALF_UP),
             max_viable_price=None,
             distance_pct=None,
+            binding_constraints=[
+                gate.gate
+                for gate in _gates_at(values, policy, lower)
+                if gate.kind == ConstraintKind.ECONOMIC and not gate.passed
+            ],
+            paths=[],
+            no_viable_price=True,
         )
 
     if _economic_passes(values, policy, upper):
@@ -98,9 +105,7 @@ def solve_max_viable_price(
 
     probe_gates = _gates_at(values, policy, max_viable_price + Decimal("1000"))
     binding_constraints = [
-        gate.gate
-        for gate in probe_gates
-        if gate.kind == ConstraintKind.ECONOMIC and not gate.passed
+        gate.gate for gate in probe_gates if gate.kind == ConstraintKind.ECONOMIC and not gate.passed
     ]
     raw_distance = (current_price - max_viable_price) / current_price
     distance = max(Decimal(0), raw_distance).quantize(RATE, rounding=ROUND_HALF_UP)
