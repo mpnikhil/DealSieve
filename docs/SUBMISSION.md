@@ -4,7 +4,11 @@
 
 The acquisitions agent for small-bay industrial buyers. It works the pipeline; you make the decisions.
 
-## Elevator pitch
+## Elevator pitch (200 characters, for the Devpost field)
+
+The acquisitions agent for small-bay industrial buyers. It underwrites every broker package on your numbers, keeps a price on every pass, and works the deals that clear. You keep the money decisions.
+
+## Elevator pitch (98 words, for the description opener)
 
 DealSieve is the acquisitions agent for small-bay light industrial buyers. It underwrites every broker offering memorandum on the buyer's own numbers, with the Prop 13 tax reset (California reassesses property tax to the sale price), real vacancy and reserves. It stores the clearing price on every pass and re-underwrites the day the price or the facts change. It runs the diligence chase for roof condition, Phase I (the environmental site assessment) and CAM reconciliation (the yearly true-up of shared building expenses billed to tenants), reads the inspection report and re-prices the basis. The principal keeps the money decisions.
 
