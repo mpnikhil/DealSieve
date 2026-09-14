@@ -20,7 +20,8 @@ import time
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
-PAGE = (ROOT / "architecture" / "diagram.html").resolve().as_uri()
+DEFAULT_PAGE = ROOT / "architecture" / "diagram.html"
+PAGE = DEFAULT_PAGE.resolve().as_uri()
 VIEWPORT = {"width": 1920, "height": 1080}
 
 
@@ -34,6 +35,7 @@ def open_page(p, static: bool):
 
 def main() -> int:
     ap = argparse.ArgumentParser()
+    ap.add_argument("--page", default=str(DEFAULT_PAGE), help="the HTML to render")
     ap.add_argument("--static")
     ap.add_argument("--video")
     ap.add_argument("--frames", help="directory for preview PNGs")
@@ -41,6 +43,8 @@ def main() -> int:
     ap.add_argument("--seconds", type=float, default=40.0)
     ap.add_argument("--fps", type=int, default=30)
     args = ap.parse_args()
+    global PAGE
+    PAGE = Path(args.page).resolve().as_uri()
     from playwright.sync_api import sync_playwright
 
     with sync_playwright() as p:

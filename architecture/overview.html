@@ -1,0 +1,324 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>DealSieve — the system at a glance</title>
+<style>
+  :root {
+    --paper: #f8fafc; --ink: #0f172a; --ink2: #334155; --dim: #64748b; --line: #e2e8f0;
+    --sans: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Helvetica Neue", Arial, sans-serif;
+    --mono: "SF Mono", Menlo, "JetBrains Mono", ui-monospace, monospace;
+  }
+  html, body { margin: 0; padding: 0; background: var(--paper); width: 100%; height: 100%; }
+  body { display: flex; align-items: center; justify-content: center; overflow: hidden;
+         font-family: var(--sans); -webkit-font-smoothing: antialiased; }
+  svg { display: block; width: min(100vw, calc(100vh * 16 / 9)); height: auto; aspect-ratio: 16 / 9; }
+  text { font-family: var(--sans); fill: var(--ink); }
+  .mono { font-family: var(--mono); }
+  .shadow { filter: drop-shadow(0 1px 2px rgba(15,23,42,.05)) drop-shadow(0 10px 30px rgba(15,23,42,.07)); }
+</style>
+</head>
+<body>
+<svg id="stage" viewBox="0 0 1920 1080" xmlns="http://www.w3.org/2000/svg"></svg>
+<script>
+(() => {
+"use strict";
+const NS = "http://www.w3.org/2000/svg";
+const svg = document.getElementById("stage");
+const C = {
+  amber: "#b45309", amberT: "#fff7ed", blue: "#1d4ed8", blueT: "#eff6ff", green: "#15803d", greenT: "#f0fdf4",
+  slate: "#475569", slateT: "#f1f5f9", ink: "#0f172a", ink2: "#334155", dim: "#64748b", line: "#e2e8f0",
+  accent: "#ea580c", cloud: "#f3f6fb", cloudLine: "#dbe3ee",
+};
+const el = (tag, attrs = {}, parent = svg) => {
+  const n = document.createElementNS(NS, tag);
+  for (const [k, v] of Object.entries(attrs)) n.setAttribute(k, v);
+  parent.appendChild(n); return n;
+};
+const txt = (x, y, s, attrs = {}, parent = svg) => { const t = el("text", { x, y, ...attrs }, parent); t.textContent = s; return t; };
+const clamp01 = (v) => Math.max(0, Math.min(1, v));
+const ease = (u) => { u = clamp01(u); return u < 0.5 ? 2 * u * u : 1 - Math.pow(-2 * u + 2, 2) / 2; };
+const win = (f, a, b) => clamp01((f - a) / Math.max(1e-6, b - a));
+
+const gBack = el("g"), gEdges = el("g"), gBlocks = el("g"), gDeco = el("g"), gAnim = el("g");
+
+// ---------------------------------------------------------------- header
+txt(132, 84, "DealSieve", { "font-size": 26, "font-weight": 600, fill: C.ink, "letter-spacing": -0.3 }, gDeco);
+txt(268, 84, "The system at a glance", { "font-size": 26, fill: C.dim }, gDeco);
+const legend = el("g", {}, gDeco);
+[[C.amber, "agents judge"], [C.blue, "code decides"], [C.green, "you approve"]].reduce((x, [col, label]) => {
+  const w = label.length * 10 + 34;
+  el("circle", { cx: x - w + 8, cy: 77, r: 6, fill: col }, legend);
+  txt(x - w + 24, 84, label, { "font-size": 20, fill: C.ink2 }, legend);
+  return x - w - 28;
+}, 1788);
+
+// ---------------------------------------------------------------- the platform container
+const cloud = el("g", {}, gBack);
+el("rect", { x: 488, y: 150, width: 944, height: 698, rx: 26, fill: C.cloud, stroke: C.cloudLine, "stroke-width": 1.5, "stroke-dasharray": "10 8" }, cloud);
+const cloudLabel = el("g", {}, cloud);
+el("rect", { x: 520, y: 132, width: 760, height: 36, rx: 18, fill: "#fff", stroke: C.cloudLine, "stroke-width": 1.5 }, cloudLabel);
+txt(900, 157, "Built with the Strands Agents SDK  ·  runs on Amazon Bedrock AgentCore Runtime", { "font-size": 19, "font-weight": 600, fill: C.ink2, "text-anchor": "middle" }, cloudLabel);
+const cloudNote = txt(524, 838, "one deployment · the same code runs offline", { "font-size": 17, fill: C.dim, class: "mono" }, cloud);
+
+// ---------------------------------------------------------------- icons
+const ICON = {
+  inbox: "M3 5h18v14H3z M3 13h5l2 3h4l2-3h5",
+  agent: "M12 12a4 4 0 1 0 0-8 4 4 0 0 0 0 8z M4 21c0-4 3.6-7 8-7s8 3 8 7",
+  calc: "M5 2h14v20H5z M8 6h8 M8 11h2 M12 11h2 M16 11h2 M8 15h2 M12 15h2 M16 15h2 M8 19h2 M12 19h6",
+  phone: "M7 2h10a2 2 0 0 1 2 2v16a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2z M10 19h4",
+  db: "M12 3c5 0 9 1.3 9 3s-4 3-9 3-9-1.3-9-3 4-3 9-3z M3 6v12c0 1.7 4 3 9 3s9-1.3 9-3V6 M3 12c0 1.7 4 3 9 3s9-1.3 9-3",
+  memory: "M4 4h16v16H4z M9 9h6v6H9z M9 2v2 M15 2v2 M9 20v2 M15 20v2 M2 9h2 M2 15h2 M20 9h2 M20 15h2",
+  check: "M20 6L9 17l-5-5",
+};
+
+// ---------------------------------------------------------------- blocks
+// Five pieces. Each: title, one-line role, three facts, one guarantee line.
+const BLOCKS = {
+  intake: { x: 120, y: 236, w: 320, h: 450, col: C.slate, tint: C.slateT, icon: "inbox",
+    kicker: "AMBIENT INTAKE", title: "Watches the inbox",
+    facts: ["Broker packages and attachments", "Price cuts and replies in the thread", "Inspection reports with photos", "Telegram and the dashboard"],
+    rule: "Wakes only when mail arrives" },
+  agents: { x: 528, y: 236, w: 408, h: 400, col: C.amber, tint: C.amberT, icon: "agent",
+    kicker: "STRANDS AGENTS SDK", title: "Read and judge",
+    facts: ["Acquisition: claims, each cited to a page or a photo", "Skeptic: what the package doesn't support", "Inspector: reports and their photographs"],
+    rule: "No arithmetic. Cannot send anything." },
+  engine: { x: 1000, y: 236, w: 408, h: 400, col: C.blue, tint: C.blueT, icon: "calc",
+    kicker: "DETERMINISTIC ENGINE", title: "Math and rules, in code",
+    facts: ["Exact decimals under a frozen, versioned policy", "A clearing price on every pass", "Screens every draft before it can leave"],
+    rule: "490+ tests · every gate lives in code" },
+  human: { x: 1480, y: 236, w: 320, h: 450, col: C.green, tint: C.greenT, icon: "phone",
+    kicker: "YOU DECIDE", title: "One tap decides",
+    facts: ["Alerted only when the answer changes", "The actual email, in the alert", "Money always waits for you"],
+    rule: "Three interruptions per deal" },
+};
+const blockEls = {};
+for (const [id, b] of Object.entries(BLOCKS)) {
+  const g = el("g", { class: "shadow" }, gBlocks);
+  const rect = el("rect", { x: b.x, y: b.y, width: b.w, height: b.h, rx: 20, fill: "#fff", stroke: C.line, "stroke-width": 1.5 }, g);
+  const head = el("rect", { x: b.x, y: b.y, width: b.w, height: 92, rx: 20, fill: b.tint }, g);
+  el("rect", { x: b.x, y: b.y + 60, width: b.w, height: 32, fill: b.tint }, g); // square off the header bottom
+  el("path", { d: ICON[b.icon], fill: "none", stroke: b.col, "stroke-width": 2, "stroke-linecap": "round", "stroke-linejoin": "round",
+    transform: `translate(${b.x + 26},${b.y + 26}) scale(1.6)` }, g);
+  txt(b.x + 78, b.y + 40, b.kicker, { "font-size": 17, "font-weight": 700, fill: b.col, "letter-spacing": 2.4 }, g);
+  const title = txt(b.x + 78, b.y + 72, b.title, { "font-size": 27, "font-weight": 650, fill: C.ink }, g);
+  const maxChars = Math.floor((b.w - 84) / 10.2);
+  const facts = [];
+  let fy = b.y + 138;
+  for (const fact of b.facts) {
+    const lines = [];
+    let rest = fact;
+    while (rest.length > maxChars) { const cut = rest.lastIndexOf(" ", maxChars); lines.push(rest.slice(0, cut)); rest = rest.slice(cut + 1); }
+    lines.push(rest);
+    el("circle", { cx: b.x + 34, cy: fy - 7, r: 4, fill: b.col }, g);
+    lines.forEach((ln, j) => facts.push(txt(b.x + 50, fy + j * 26, ln, { "font-size": 20, fill: C.ink2 }, g)));
+    fy += 26 * lines.length + 20;
+  }
+  const ruleY = b.y + b.h - 34;
+  el("rect", { x: b.x + 22, y: ruleY - 26, width: b.w - 44, height: 1, fill: C.line }, g);
+  const rule = txt(b.x + 26, ruleY + 4, b.rule, { "font-size": 18, "font-weight": 600, fill: b.col }, g);
+  blockEls[id] = { g, rect, head, title, facts, rule, b };
+}
+// the memory band inside the platform container
+const band = el("g", { class: "shadow" }, gBlocks);
+el("rect", { x: 528, y: 660, width: 880, height: 160, rx: 20, fill: "#fff", stroke: C.line, "stroke-width": 1.5 }, band);
+el("rect", { x: 528, y: 660, width: 880, height: 46, rx: 20, fill: C.slateT }, band);
+el("rect", { x: 528, y: 684, width: 880, height: 22, fill: C.slateT }, band);
+txt(556, 691, "MEMORY", { "font-size": 17, "font-weight": 700, fill: C.slate, "letter-spacing": 2.4 }, band);
+txt(668, 691, "why it can pick a deal back up six weeks later, and why nothing is lost", { "font-size": 18, fill: C.dim }, band);
+// left half: ledger
+el("path", { d: ICON.db, fill: "none", stroke: C.slate, "stroke-width": 2, "stroke-linecap": "round", "stroke-linejoin": "round", transform: "translate(556,726) scale(1.5)" }, band);
+const ledgerTitle = txt(606, 750, "Append-only ledger", { "font-size": 24, "font-weight": 650 }, band);
+txt(606, 778, "every event, run and piece of evidence", { "font-size": 19, fill: C.ink2 }, band);
+txt(606, 803, "SQLite · never edited or deleted", { "font-size": 18, fill: C.dim, class: "mono" }, band);
+el("rect", { x: 968, y: 722, width: 1, height: 84, fill: C.line }, band);
+// right half: decision memory
+el("path", { d: ICON.memory, fill: "none", stroke: C.slate, "stroke-width": 2, "stroke-linecap": "round", "stroke-linejoin": "round", transform: "translate(998,726) scale(1.5)" }, band);
+const memTitle = txt(1048, 750, "Decision memory", { "font-size": 24, "font-weight": 650 }, band);
+txt(1048, 778, "past passes and prices, quoted back", { "font-size": 19, fill: C.ink2 }, band);
+txt(1048, 803, "Amazon Bedrock AgentCore Memory", { "font-size": 18, fill: C.dim, class: "mono" }, band);
+
+// ---------------------------------------------------------------- the three promises
+const PROMISES = [
+  { x: 120, kicker: "AMBIENT", col: C.slate, lines: ["Watches, follows up on day 3 and day 6,", "then stops and tells you once. Otherwise silent."] },
+  { x: 680, kicker: "RELIABLE", col: C.blue, lines: ["Math and gates live in tested code, every claim", "is cited, every run is on the record."] },
+  { x: 1240, kicker: "UNDER YOUR CONTROL", col: C.green, lines: ["A first message to a broker waits for your tap.", "Anything about money always does."] },
+];
+const promiseEls = PROMISES.map((p) => {
+  const g = el("g", {}, gDeco);
+  el("rect", { x: p.x, y: 906, width: 5, height: 92, rx: 2.5, fill: p.col }, g);
+  txt(p.x + 22, 926, p.kicker, { "font-size": 17, "font-weight": 700, fill: p.col, "letter-spacing": 2.4 }, g);
+  p.lines.forEach((s, i) => txt(p.x + 22, 958 + i * 28, s, { "font-size": 20, fill: C.ink2 }, g));
+  return g;
+});
+// platform strip
+const PLATFORM = ["Strands Agents SDK", "Amazon Bedrock AgentCore Runtime", "AgentCore Memory", "Amazon Bedrock", "SQLite", "Telegram"];
+const platEls = [];
+{
+  let x = 120;
+  PLATFORM.forEach((s, i) => {
+    platEls.push(txt(x, 1046, s, { "font-size": 19, fill: C.dim, class: "mono" }, gDeco));
+    x += s.length * 11.45 + 12;
+    if (i < PLATFORM.length - 1) { txt(x, 1046, "·", { "font-size": 19, fill: C.line }, gDeco); x += 26; }
+  });
+}
+
+// ---------------------------------------------------------------- edges (few, big)
+const EDGES = {
+  inAg:  { d: "M440,400 H528", col: C.amber, t: [0.07, 0.10], label: null },
+  agEn:  { d: "M936,400 H1000", col: C.blue, t: [0.40, 0.44] },
+  enHu:  { d: "M1408,400 H1480", col: C.green, t: [0.74, 0.78] },
+  enMem: { d: "M1204,636 V660", col: C.slate, t: [0.60, 0.63] },
+  memAg: { d: "M732,660 V636", col: C.slate, t: [0.66, 0.69] },
+  loop:  { d: "M1640,686 V872 H280 V686", col: C.slate, dashed: true, t: [0.90, 0.97] },
+};
+const edgeEls = {};
+for (const [id, e] of Object.entries(EDGES)) {
+  const g = el("g", {}, gEdges);
+  el("path", { d: e.d, fill: "none", stroke: C.line, "stroke-width": 3, "stroke-dasharray": e.dashed ? "8 8" : "none" }, g);
+  const live = el("path", { d: e.d, fill: "none", stroke: e.col, "stroke-width": 3, "stroke-linecap": "round", "stroke-linejoin": "round" }, g);
+  const len = live.getTotalLength();
+  live.setAttribute("stroke-dasharray", e.dashed ? "8 8" : `${len}`);
+  const p1 = live.getPointAtLength(Math.max(0, len - 1)), p2 = live.getPointAtLength(len);
+  const ang = Math.atan2(p2.y - p1.y, p2.x - p1.x) * 180 / Math.PI;
+  el("polygon", { points: "0,0 -14,-7 -14,7", fill: C.line, transform: `translate(${p2.x},${p2.y}) rotate(${ang})` }, g);
+  const head = el("polygon", { points: "0,0 -14,-7 -14,7", fill: e.col, transform: `translate(${p2.x},${p2.y}) rotate(${ang})` }, g);
+  edgeEls[id] = { g, live, head, len, e };
+}
+const edgeLabel = (x, y, s, anchor = "middle") => txt(x, y, s, { "font-size": 16, fill: C.dim, class: "mono", "text-anchor": anchor }, gDeco);
+const labels = [
+  edgeLabel(484, 384, "package"), edgeLabel(968, 384, "claims"), edgeLabel(1444, 384, "verdict"),
+  edgeLabel(1218, 654, "record", "start"), edgeLabel(718, 654, "recall", "end"),
+  edgeLabel(960, 862, "a reply, a price cut, a report → the whole path runs again"),
+];
+
+// ---------------------------------------------------------------- animation pieces
+const motion = (d) => { const p = el("path", { d, fill: "none", stroke: "none" }, gAnim); return { p, len: p.getTotalLength() }; };
+const M = {
+  inAg: motion("M300,400 H528"), agEn: motion("M936,400 H1000"), enHu: motion("M1408,400 H1480"),
+  enMem: motion("M1204,636 V660"), loop: motion("M1640,686 V872 H280 V686"),
+};
+const mkPacket = (col, label) => {
+  const g = el("g", { opacity: 0 }, gAnim);
+  const w = label.length * 11 + 30;
+  el("circle", { cx: -18, cy: 0, r: 22, fill: col, opacity: 0.12 }, g);
+  el("rect", { x: -w / 2, y: -17, width: w, height: 34, rx: 17, fill: col }, g);
+  txt(0, 6, label, { "font-size": 17, "font-weight": 700, fill: "#fff", "text-anchor": "middle", class: "mono" }, g);
+  return g;
+};
+const PK = { pkg: mkPacket(C.accent, "package"), claims: mkPacket(C.blue, "claims"), dec: mkPacket(C.green, "REVIEW"), rec: mkPacket(C.slate, "run #42"), reply: mkPacket(C.slate, "price cut") };
+const place = (g, m, u) => { const pt = m.p.getPointAtLength(clamp01(u) * m.len); g.setAttribute("opacity", 1); g.setAttribute("transform", `translate(${pt.x},${pt.y})`); };
+const hide = (g) => g.setAttribute("opacity", 0);
+const mkChip = (x, y, s, col) => {
+  const g = el("g", { opacity: 0 }, gAnim);
+  const w = s.length * 10.2 + 30;
+  el("rect", { x, y, width: w, height: 38, rx: 10, fill: "#fff", stroke: col, "stroke-width": 1.5 }, g);
+  el("rect", { x, y, width: 5, height: 38, rx: 2.5, fill: col }, g);
+  txt(x + 17, y + 25, s, { "font-size": 18, fill: C.ink2, class: "mono" }, g);
+  return g;
+};
+const CH = {
+  claim: mkChip(528, 186, "cap rate 8.0% · p.3  →  6.4% on my numbers", C.amber),
+  gate: mkChip(1000, 186, "clears at $1.29M · REVIEW", C.blue),
+  skp: mkChip(528, 186, "unsupported: roof age · Phase I · CAM", C.amber),
+  mem: mkChip(1000, 826, "You previously: passed at $1.29M", C.slate),
+  tap: mkChip(1508, 690, "Approve and send  ✓", C.green),
+  money: mkChip(1508, 690, "credit request: waits for you", C.green),
+};
+const ripple = el("circle", { cx: 1640, cy: 500, r: 0, fill: "none", stroke: C.green, "stroke-width": 3, opacity: 0 }, gAnim);
+const boundary = el("g", { opacity: 0 }, gAnim);
+el("rect", { x: 966, y: 236, width: 4, height: 400, rx: 2, fill: C.accent }, boundary);
+el("rect", { x: 848, y: 560, width: 240, height: 34, rx: 8, fill: C.accent }, boundary);
+txt(968, 584, "judgment ends here", { "font-size": 17, "font-weight": 700, fill: "#fff", "text-anchor": "middle", class: "mono" }, boundary);
+const chip = (g, f, a, b) => { const o = Math.min(win(f, a, a + 0.012), 1 - win(f, b - 0.012, b)); g.setAttribute("opacity", o); g.setAttribute("transform", `translate(0,${(1 - ease(win(f, a, a + 0.012))) * 8})`); };
+
+// ---------------------------------------------------------------- timeline (fractions of the block's narration)
+// n8: built(0-4%) · inbox+agents(4-13%) · acquisition(13-29%) · inspector(29-36%) · read and judge / no arithmetic (36-45%)
+//     · plain python (45-60%) · skeptic (60-67%) · ledger + memory (67-78%) · money screen + phone (78-89%) · platform (89-100%)
+let DURATION = 47000;
+const CUES = { intro: 0, intake: 0.05, agents: 0.10, boundary: 0.36, engine: 0.45, skeptic: 0.60, memory: 0.67, human: 0.78, platform: 0.89 };
+window.setDuration = (ms) => { DURATION = ms; };
+window.cues = () => Object.fromEntries(Object.entries(CUES).map(([k, v]) => [k, Math.round(v * DURATION)]));
+const LIT = { intake: 0.07, agents: 0.10, engine: 0.44, human: 0.78 };
+
+function setBlock(be, lit, hot) {
+  be.rect.setAttribute("stroke", lit ? be.b.col : C.line);
+  be.rect.setAttribute("stroke-width", lit ? 2.5 : 1.5);
+  be.g.setAttribute("transform", `translate(0,${-4 * hot})`);
+}
+function render(f) {
+  f = clamp01(f);
+  const STATIC = f >= 1;
+  // scaffolding
+  cloud.setAttribute("opacity", ease(win(f, 0.0, 0.04)));
+  legend.setAttribute("opacity", ease(win(f, 0.0, 0.03)));
+  const order = ["intake", "agents", "engine", "human"];
+  order.forEach((id, i) => {
+    const be = blockEls[id];
+    be.g.setAttribute("opacity", ease(win(f, 0.01 + i * 0.008, 0.045 + i * 0.008)));
+    const t0 = LIT[id];
+    const hot = f >= t0 ? 1 - win(f, t0, t0 + 0.03) : 0;
+    setBlock(be, f >= t0, hot);
+  });
+  band.setAttribute("opacity", ease(win(f, 0.04, 0.075)));
+  const memLit = f >= 0.63;
+  ledgerTitle.setAttribute("fill", memLit ? C.slate : C.ink);
+  memTitle.setAttribute("fill", f >= 0.69 ? C.slate : C.ink);
+  band.setAttribute("transform", `translate(0,${-4 * (f >= 0.63 ? 1 - win(f, 0.63, 0.66) : 0)})`);
+  promiseEls.forEach((g, i) => g.setAttribute("opacity", ease(win(f, 0.05 + i * 0.01, 0.085 + i * 0.01))));
+  labels.forEach((t) => t.setAttribute("opacity", ease(win(f, 0.05, 0.08))));
+  platEls.forEach((t, i) => {
+    t.setAttribute("opacity", ease(win(f, 0.05, 0.08)));
+    const lit = f >= 0.89 + i * 0.017;
+    t.setAttribute("fill", lit ? C.ink : C.dim); t.setAttribute("font-weight", lit ? 700 : 400);
+  });
+  // the platform label gets its beat at the end
+  const platBeat = f >= 0.905 && f < 0.99;
+  cloudLabel.querySelector("rect").setAttribute("stroke", platBeat ? C.ink2 : C.cloudLine);
+  cloudLabel.querySelector("rect").setAttribute("stroke-width", platBeat ? 2.5 : 1.5);
+  cloudNote.setAttribute("fill", platBeat ? C.ink2 : C.dim);
+  // edges
+  Object.values(edgeEls).forEach((ee) => {
+    ee.g.setAttribute("opacity", ease(win(f, 0.05, 0.08)));
+    const u = win(f, ee.e.t[0], ee.e.t[1]);
+    if (ee.e.dashed) ee.live.setAttribute("opacity", u); else ee.live.setAttribute("stroke-dashoffset", ee.len * (1 - u));
+    ee.head.setAttribute("opacity", u >= 0.98 ? 1 : 0);
+  });
+  // packets
+  Object.values(PK).forEach(hide);
+  if (f >= 0.06 && f < 0.10) place(PK.pkg, M.inAg, ease(win(f, 0.06, 0.10)));
+  if (f >= 0.40 && f < 0.44) place(PK.claims, M.agEn, ease(win(f, 0.40, 0.44)));
+  if (f >= 0.60 && f < 0.63) place(PK.rec, M.enMem, ease(win(f, 0.60, 0.63)));
+  if (f >= 0.74 && f < 0.78) place(PK.dec, M.enHu, ease(win(f, 0.74, 0.78)));
+  if (f >= 0.90 && f < 0.97) place(PK.reply, M.loop, ease(win(f, 0.90, 0.97)));
+  // chips and beats
+  chip(CH.claim, f, 0.14, 0.29);
+  chip(CH.skp, f, 0.61, 0.67);
+  chip(CH.gate, f, 0.47, 0.60);
+  chip(CH.mem, f, 0.70, 0.78);
+  chip(CH.tap, f, 0.80, 0.845);
+  chip(CH.money, f, 0.85, 0.89);
+  const bnd = win(f, 0.36, 0.372) * (1 - win(f, 0.44, 0.452));
+  boundary.setAttribute("opacity", bnd);
+  const ru = win(f, 0.795, 0.83);
+  ripple.setAttribute("opacity", ru > 0 && ru < 1 ? (1 - ru) * 0.9 : 0);
+  ripple.setAttribute("r", ru > 0 && ru < 1 ? 10 + 60 * ease(ru) : 0);
+  if (STATIC) { Object.values(PK).forEach(hide); Object.values(CH).forEach(hide); boundary.setAttribute("opacity", 0); }
+}
+
+// ---------------------------------------------------------------- API
+let playing = false, rafId = 0, t0 = 0;
+window.seek = (ms) => { playing = false; if (rafId) cancelAnimationFrame(rafId); render(ms / DURATION); };
+window.pause = () => { playing = false; if (rafId) cancelAnimationFrame(rafId); };
+window.play = () => {
+  playing = true; t0 = performance.now();
+  const tick = (now) => { if (!playing) return; const ms = (now - t0) % (DURATION + 2500); render(Math.min(1, ms / DURATION)); rafId = requestAnimationFrame(tick); };
+  rafId = requestAnimationFrame(tick);
+};
+window.renderStatic = () => { window.pause(); render(1); };
+const q = new URLSearchParams(location.search);
+if (q.get("static") === "1") window.renderStatic(); else if (q.get("autoplay") !== "0") window.play(); else render(0);
+})();
+</script>
+</body>
+</html>
