@@ -1,6 +1,6 @@
 # Current Status
 
-Last updated: 2026-09-13 15:10 PDT. Submission deadline: 2026-09-14 17:00 PDT.
+Last updated: 2026-09-13 22:00 PDT. Submission deadline: 2026-09-14 17:00 PDT.
 
 ## Completed
 - Phase 1: deterministic underwriting engine, immutable policy, SQLite event store, identity resolution, .eml ingestion, Strands Acquisition and Skeptic agents, `CLIModel` (claude/codex/agy) and `ScriptedModel` providers, FastAPI + React dashboard, console/Telegram notifiers, CLI, AgentCore entrypoint (deployed; see deploys/LEDGER.tsv).
@@ -10,12 +10,12 @@ Last updated: 2026-09-13 15:10 PDT. Submission deadline: 2026-09-14 17:00 PDT.
 - Live model runs: acts 1-2 through Claude Sonnet, Gemini Flash and Codex; act 3 with photos through Codex.
 
 ## Working Now
-- Demo video final render.
+- Final review of the demo video (2:40 cut, product-first script, phone recordings of two alerts) and the Devpost submission.
 
 
 ## Blockers
 - Bedrock tokens-per-day quota on the new account (0, auto-lifts): the deployed runtime answers status invocations; the model path waits.
-- No Telegram bot token on this machine: Telegram delivery and inline approval untested live (console notifier and dashboard approval verified).
+- Telegram verified live: alerts with the full draft email and an Approve button reached the phone; approval sends through the outbox. A live end-to-end phone session for the stall alert was not recorded.
 
 ## Next Three Tasks
 1. Finish and review the demo video; submit on Devpost with docs/SUBMISSION.md.
@@ -28,5 +28,5 @@ Live acts 1-2 (claude / agy / codex): PASS
 Live act 3 with photos (codex): PASS
 Dashboard against live data (incl. memory panels): PASS
 Trace explorer 2000 traces: PASS
-Telegram: UNTESTED (no token)
+Telegram: PASS (live alerts and approval from the phone)
 AgentCore: DEPLOYED, status path PASS, model path PENDING Bedrock quota
