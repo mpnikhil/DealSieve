@@ -6,8 +6,8 @@
 <style>
   :root {
     --paper: #f8fafc; --ink: #0f172a; --ink2: #334155; --dim: #64748b; --line: #e2e8f0;
-    --sans: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Helvetica Neue", Arial, sans-serif;
-    --mono: "SF Mono", Menlo, "JetBrains Mono", ui-monospace, monospace;
+    --sans: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", "Helvetica Neue", Arial, sans-serif;
+    --mono: "SF Mono", Menlo, Consolas, "JetBrains Mono", ui-monospace, monospace;
   }
   html, body { margin: 0; padding: 0; background: var(--paper); width: 100%; height: 100%; }
   body { display: flex; align-items: center; justify-content: center; overflow: hidden;
@@ -23,6 +23,11 @@
 <script>
 (() => {
 "use strict";
+const q = new URLSearchParams(location.search);
+// ?font=Georgia checks the layout under another typeface: every line below is measured in the
+// browser and wrapped or shrunk to fit, so the picture holds on any machine.
+if (q.get("font")) { document.documentElement.style.setProperty("--sans", q.get("font")); document.documentElement.style.setProperty("--mono", q.get("font")); }
+
 const NS = "http://www.w3.org/2000/svg";
 const svg = document.getElementById("stage");
 const C = {
@@ -36,30 +41,60 @@ const el = (tag, attrs = {}, parent = svg) => {
   parent.appendChild(n); return n;
 };
 const txt = (x, y, s, attrs = {}, parent = svg) => { const t = el("text", { x, y, ...attrs }, parent); t.textContent = s; return t; };
+const measure = (t) => { try { return t.getComputedTextLength(); } catch (e) { return 0; } };
+const fit = (t, maxW, minSize = 13) => {           // shrink a line until it fits its box
+  let fs = parseFloat(t.getAttribute("font-size"));
+  while (measure(t) > maxW && fs > minSize) { fs -= 0.5; t.setAttribute("font-size", fs); }
+  return t;
+};
+const wrap = (x, y, s, maxW, attrs, parent, lineH) => {   // word-wrap by measurement
+  const out = []; let cur = ""; let t = txt(x, y, "", attrs, parent);
+  for (const w of s.split(" ")) {
+    const cand = cur ? cur + " " + w : w;
+    t.textContent = cand;
+    if (measure(t) > maxW && cur) { t.textContent = cur; out.push(t); cur = w; t = txt(x, y + out.length * lineH, w, attrs, parent); }
+    else cur = cand;
+  }
+  t.textContent = cur; out.push(t); return out;
+};
 const clamp01 = (v) => Math.max(0, Math.min(1, v));
 const ease = (u) => { u = clamp01(u); return u < 0.5 ? 2 * u * u : 1 - Math.pow(-2 * u + 2, 2) / 2; };
 const win = (f, a, b) => clamp01((f - a) / Math.max(1e-6, b - a));
 
 const gBack = el("g"), gEdges = el("g"), gBlocks = el("g"), gDeco = el("g"), gAnim = el("g");
 
+// ---------------------------------------------------------------- geometry
+const BLOCK_Y = 236, BLOCK_H = 440, BLOCK_BOTTOM = BLOCK_Y + BLOCK_H;      // 676
+const BAND_Y = 700, BAND_H = 160;                                            // 700..860
+const CLOUD = { x: 488, y: 150, w: 912, h: 736 };                            // ..886
+const LOOP_Y = 910;
+const AGENTS_X = 528, ENGINE_X = 976, BLOCK_W = 392, HUMAN_X = 1448, SIDE_W = 320, HUMAN_W = 352;
+const AGENTS_CX = AGENTS_X + BLOCK_W / 2, ENGINE_CX = ENGINE_X + BLOCK_W / 2, HUMAN_CX = HUMAN_X + HUMAN_W / 2;
+const GAP_X = (AGENTS_X + BLOCK_W + ENGINE_X) / 2;                            // 946
+
 // ---------------------------------------------------------------- header
-txt(132, 84, "DealSieve", { "font-size": 26, "font-weight": 600, fill: C.ink, "letter-spacing": -0.3 }, gDeco);
-txt(268, 84, "The system at a glance", { "font-size": 26, fill: C.dim }, gDeco);
+txt(120, 84, "DealSieve", { "font-size": 26, "font-weight": 600, fill: C.ink, "letter-spacing": -0.3 }, gDeco);
+txt(256, 84, "The system at a glance", { "font-size": 26, fill: C.dim }, gDeco);
 const legend = el("g", {}, gDeco);
-[[C.amber, "agents judge"], [C.blue, "code decides"], [C.green, "you approve"]].reduce((x, [col, label]) => {
-  const w = label.length * 10 + 34;
-  el("circle", { cx: x - w + 8, cy: 77, r: 6, fill: col }, legend);
-  txt(x - w + 24, 84, label, { "font-size": 20, fill: C.ink2 }, legend);
-  return x - w - 28;
-}, 1788);
+{
+  let x = 1800;
+  for (const [col, label] of [[C.green, "you approve"], [C.blue, "code decides"], [C.amber, "agents judge"]]) {
+    const t = txt(0, 84, label, { "font-size": 20, fill: C.ink2 }, legend);
+    const w = measure(t);
+    t.setAttribute("x", x - w);
+    el("circle", { cx: x - w - 16, cy: 77, r: 6, fill: col }, legend);
+    x = x - w - 16 - 30;
+  }
+}
 
 // ---------------------------------------------------------------- the platform container
 const cloud = el("g", {}, gBack);
-el("rect", { x: 488, y: 150, width: 944, height: 698, rx: 26, fill: C.cloud, stroke: C.cloudLine, "stroke-width": 1.5, "stroke-dasharray": "10 8" }, cloud);
+el("rect", { x: CLOUD.x, y: CLOUD.y, width: CLOUD.w, height: CLOUD.h, rx: 26, fill: C.cloud, stroke: C.cloudLine, "stroke-width": 1.5, "stroke-dasharray": "10 8" }, cloud);
 const cloudLabel = el("g", {}, cloud);
-el("rect", { x: 520, y: 132, width: 760, height: 36, rx: 18, fill: "#fff", stroke: C.cloudLine, "stroke-width": 1.5 }, cloudLabel);
-txt(900, 157, "Built with the Strands Agents SDK  ·  runs on Amazon Bedrock AgentCore Runtime", { "font-size": 19, "font-weight": 600, fill: C.ink2, "text-anchor": "middle" }, cloudLabel);
-const cloudNote = txt(524, 838, "one deployment · the same code runs offline", { "font-size": 17, fill: C.dim, class: "mono" }, cloud);
+const pillRect = el("rect", { x: 520, y: 132, width: 10, height: 36, rx: 18, fill: "#fff", stroke: C.cloudLine, "stroke-width": 1.5 }, cloudLabel);
+const pillText = fit(txt(544, 157, "Built with the Strands Agents SDK  ·  runs on Amazon Bedrock AgentCore Runtime", { "font-size": 19, "font-weight": 600, fill: C.ink2 }, cloudLabel), 830);
+pillRect.setAttribute("width", measure(pillText) + 48);
+const cloudNote = fit(txt(524, CLOUD.y + CLOUD.h - 10, "one deployment · the same code runs offline", { "font-size": 17, fill: C.dim, class: "mono" }, cloud), 430);
 
 // ---------------------------------------------------------------- icons
 const ICON = {
@@ -69,108 +104,107 @@ const ICON = {
   phone: "M7 2h10a2 2 0 0 1 2 2v16a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2z M10 19h4",
   db: "M12 3c5 0 9 1.3 9 3s-4 3-9 3-9-1.3-9-3 4-3 9-3z M3 6v12c0 1.7 4 3 9 3s9-1.3 9-3V6 M3 12c0 1.7 4 3 9 3s9-1.3 9-3",
   memory: "M4 4h16v16H4z M9 9h6v6H9z M9 2v2 M15 2v2 M9 20v2 M15 20v2 M2 9h2 M2 15h2 M20 9h2 M20 15h2",
-  check: "M20 6L9 17l-5-5",
 };
 
-// ---------------------------------------------------------------- blocks
-// Five pieces. Each: title, one-line role, three facts, one guarantee line.
+// ---------------------------------------------------------------- the four blocks (one height, one rhythm)
 const BLOCKS = {
-  intake: { x: 120, y: 236, w: 320, h: 450, col: C.slate, tint: C.slateT, icon: "inbox",
+  intake: { x: 120, w: SIDE_W, col: C.slate, tint: C.slateT, icon: "inbox",
     kicker: "AMBIENT INTAKE", title: "Watches the inbox",
-    facts: ["Broker packages and attachments", "Price cuts and replies in the thread", "Inspection reports with photos", "Telegram and the dashboard"],
+    facts: ["Broker packages and the attached OMs", "Price cuts and replies in the same thread", "Inspection reports with their photos", "Telegram and the dashboard"],
     rule: "Wakes only when mail arrives" },
-  agents: { x: 528, y: 236, w: 408, h: 400, col: C.amber, tint: C.amberT, icon: "agent",
+  agents: { x: AGENTS_X, w: BLOCK_W, col: C.amber, tint: C.amberT, icon: "agent",
     kicker: "STRANDS AGENTS SDK", title: "Read and judge",
-    facts: ["Acquisition: claims, each cited to a page or a photo", "Skeptic: what the package doesn't support", "Inspector: reports and their photographs"],
+    facts: ["Acquisition agent: pulls out the claims and cites the page or the photo for each one", "Skeptic agent: argues what the package doesn't back up", "Inspector agent: reads the reports and their photographs"],
     rule: "No arithmetic. Cannot send anything." },
-  engine: { x: 1000, y: 236, w: 408, h: 400, col: C.blue, tint: C.blueT, icon: "calc",
-    kicker: "DETERMINISTIC ENGINE", title: "Math and rules, in code",
-    facts: ["Exact decimals under a frozen, versioned policy", "A clearing price on every pass", "Screens every draft before it can leave"],
-    rule: "490+ tests · every gate lives in code" },
-  human: { x: 1480, y: 236, w: 320, h: 450, col: C.green, tint: C.greenT, icon: "phone",
-    kicker: "YOU DECIDE", title: "One tap decides",
-    facts: ["Alerted only when the answer changes", "The actual email, in the alert", "Money always waits for you"],
-    rule: "Three interruptions per deal" },
+  engine: { x: ENGINE_X, w: BLOCK_W, col: C.blue, tint: C.blueT, icon: "calc",
+    kicker: "DETERMINISTIC ENGINE", title: "Math and guardrails",
+    facts: ["Every dollar computed in code, exactly, under your frozen policy", "For every pass, the price at which the deal would actually work", "Screens every outgoing draft: money and first contact stop here"],
+    rule: "Hard rules in code, not in a prompt" },
+  human: { x: HUMAN_X, w: HUMAN_W, col: C.green, tint: C.greenT, icon: "phone",
+    kicker: "HUMAN IN THE LOOP", title: "You decide",
+    facts: ["Approve the first email to any broker. Follow-ups then go out on their own.", "Approve anything about money: credits, offers, terms.", "Otherwise it stays quiet until a deal's answer changes."],
+    rule: "Three taps across the life of a deal" },
 };
 const blockEls = {};
 for (const [id, b] of Object.entries(BLOCKS)) {
   const g = el("g", { class: "shadow" }, gBlocks);
-  const rect = el("rect", { x: b.x, y: b.y, width: b.w, height: b.h, rx: 20, fill: "#fff", stroke: C.line, "stroke-width": 1.5 }, g);
-  const head = el("rect", { x: b.x, y: b.y, width: b.w, height: 92, rx: 20, fill: b.tint }, g);
-  el("rect", { x: b.x, y: b.y + 60, width: b.w, height: 32, fill: b.tint }, g); // square off the header bottom
+  const rect = el("rect", { x: b.x, y: BLOCK_Y, width: b.w, height: BLOCK_H, rx: 20, fill: "#fff", stroke: C.line, "stroke-width": 1.5 }, g);
+  el("rect", { x: b.x, y: BLOCK_Y, width: b.w, height: 92, rx: 20, fill: b.tint }, g);
+  el("rect", { x: b.x, y: BLOCK_Y + 60, width: b.w, height: 32, fill: b.tint }, g);
   el("path", { d: ICON[b.icon], fill: "none", stroke: b.col, "stroke-width": 2, "stroke-linecap": "round", "stroke-linejoin": "round",
-    transform: `translate(${b.x + 26},${b.y + 26}) scale(1.6)` }, g);
-  txt(b.x + 78, b.y + 40, b.kicker, { "font-size": 17, "font-weight": 700, fill: b.col, "letter-spacing": 2.4 }, g);
-  const title = txt(b.x + 78, b.y + 72, b.title, { "font-size": 27, "font-weight": 650, fill: C.ink }, g);
-  const maxChars = Math.floor((b.w - 84) / 10.2);
+    transform: `translate(${b.x + 26},${BLOCK_Y + 26}) scale(1.6)` }, g);
+  fit(txt(b.x + 78, BLOCK_Y + 40, b.kicker, { "font-size": 17, "font-weight": 700, fill: b.col, "letter-spacing": 2.4 }, g), b.w - 100);
+  fit(txt(b.x + 78, BLOCK_Y + 72, b.title, { "font-size": 27, "font-weight": 650, fill: C.ink }, g), b.w - 100);
   const facts = [];
-  let fy = b.y + 138;
+  let fy = BLOCK_Y + 136;
+  const factW = b.w - 84;
+  const size = b.facts.length > 3 ? 19 : 20, lineH = b.facts.length > 3 ? 24 : 25;
   for (const fact of b.facts) {
-    const lines = [];
-    let rest = fact;
-    while (rest.length > maxChars) { const cut = rest.lastIndexOf(" ", maxChars); lines.push(rest.slice(0, cut)); rest = rest.slice(cut + 1); }
-    lines.push(rest);
     el("circle", { cx: b.x + 34, cy: fy - 7, r: 4, fill: b.col }, g);
-    lines.forEach((ln, j) => facts.push(txt(b.x + 50, fy + j * 26, ln, { "font-size": 20, fill: C.ink2 }, g)));
-    fy += 26 * lines.length + 20;
+    const lines = wrap(b.x + 50, fy, fact, factW, { "font-size": size, fill: C.ink2 }, g, lineH);
+    facts.push(...lines);
+    fy += lineH * lines.length + 16;
   }
-  const ruleY = b.y + b.h - 34;
+  const ruleY = BLOCK_BOTTOM - 34;
   el("rect", { x: b.x + 22, y: ruleY - 26, width: b.w - 44, height: 1, fill: C.line }, g);
-  const rule = txt(b.x + 26, ruleY + 4, b.rule, { "font-size": 18, "font-weight": 600, fill: b.col }, g);
-  blockEls[id] = { g, rect, head, title, facts, rule, b };
+  fit(txt(b.x + 26, ruleY + 4, b.rule, { "font-size": 18, "font-weight": 600, fill: b.col }, g), b.w - 52);
+  blockEls[id] = { g, rect, facts, b };
 }
+
 // the memory band inside the platform container
 const band = el("g", { class: "shadow" }, gBlocks);
-el("rect", { x: 528, y: 660, width: 880, height: 160, rx: 20, fill: "#fff", stroke: C.line, "stroke-width": 1.5 }, band);
-el("rect", { x: 528, y: 660, width: 880, height: 46, rx: 20, fill: C.slateT }, band);
-el("rect", { x: 528, y: 684, width: 880, height: 22, fill: C.slateT }, band);
-txt(556, 691, "MEMORY", { "font-size": 17, "font-weight": 700, fill: C.slate, "letter-spacing": 2.4 }, band);
-txt(668, 691, "why it can pick a deal back up six weeks later, and why nothing is lost", { "font-size": 18, fill: C.dim }, band);
-// left half: ledger
-el("path", { d: ICON.db, fill: "none", stroke: C.slate, "stroke-width": 2, "stroke-linecap": "round", "stroke-linejoin": "round", transform: "translate(556,726) scale(1.5)" }, band);
-const ledgerTitle = txt(606, 750, "Append-only ledger", { "font-size": 24, "font-weight": 650 }, band);
-txt(606, 778, "every event, run and piece of evidence", { "font-size": 19, fill: C.ink2 }, band);
-txt(606, 803, "SQLite · never edited or deleted", { "font-size": 18, fill: C.dim, class: "mono" }, band);
-el("rect", { x: 968, y: 722, width: 1, height: 84, fill: C.line }, band);
-// right half: decision memory
-el("path", { d: ICON.memory, fill: "none", stroke: C.slate, "stroke-width": 2, "stroke-linecap": "round", "stroke-linejoin": "round", transform: "translate(998,726) scale(1.5)" }, band);
-const memTitle = txt(1048, 750, "Decision memory", { "font-size": 24, "font-weight": 650 }, band);
-txt(1048, 778, "past passes and prices, quoted back", { "font-size": 19, fill: C.ink2 }, band);
-txt(1048, 803, "Amazon Bedrock AgentCore Memory", { "font-size": 18, fill: C.dim, class: "mono" }, band);
+const BAND_X = AGENTS_X, BAND_W = ENGINE_X + BLOCK_W - AGENTS_X;   // 528..1368
+el("rect", { x: BAND_X, y: BAND_Y, width: BAND_W, height: BAND_H, rx: 20, fill: "#fff", stroke: C.line, "stroke-width": 1.5 }, band);
+el("rect", { x: BAND_X, y: BAND_Y, width: BAND_W, height: 46, rx: 20, fill: C.slateT }, band);
+el("rect", { x: BAND_X, y: BAND_Y + 24, width: BAND_W, height: 22, fill: C.slateT }, band);
+const bandKicker = txt(BAND_X + 28, BAND_Y + 31, "MEMORY", { "font-size": 17, "font-weight": 700, fill: C.slate, "letter-spacing": 2.4 }, band);
+fit(txt(BAND_X + 28 + measure(bandKicker) + 24, BAND_Y + 31, "why it can pick a deal back up six weeks later, and why nothing is lost", { "font-size": 18, fill: C.dim }, band), BAND_W - 200);
+const halfW = BAND_W / 2;
+const half = (x, icon, title, line1, line2) => {
+  el("path", { d: ICON[icon], fill: "none", stroke: C.slate, "stroke-width": 2, "stroke-linecap": "round", "stroke-linejoin": "round", transform: `translate(${x},${BAND_Y + 66}) scale(1.5)` }, band);
+  const t = fit(txt(x + 50, BAND_Y + 90, title, { "font-size": 24, "font-weight": 650 }, band), halfW - 90);
+  fit(txt(x + 50, BAND_Y + 118, line1, { "font-size": 19, fill: C.ink2 }, band), halfW - 90);
+  fit(txt(x + 50, BAND_Y + 143, line2, { "font-size": 18, fill: C.dim, class: "mono" }, band), halfW - 90);
+  return t;
+};
+const ledgerTitle = half(BAND_X + 28, "db", "Append-only ledger", "every event, run and piece of evidence", "SQLite · never edited or deleted");
+el("rect", { x: BAND_X + halfW, y: BAND_Y + 62, width: 1, height: 84, fill: C.line }, band);
+const memTitle = half(BAND_X + halfW + 30, "memory", "Decision memory", "your past passes and prices, quoted back", "Amazon Bedrock AgentCore Memory");
 
 // ---------------------------------------------------------------- the three promises
 const PROMISES = [
-  { x: 120, kicker: "AMBIENT", col: C.slate, lines: ["Watches, follows up on day 3 and day 6,", "then stops and tells you once. Otherwise silent."] },
-  { x: 680, kicker: "RELIABLE", col: C.blue, lines: ["Math and gates live in tested code, every claim", "is cited, every run is on the record."] },
-  { x: 1240, kicker: "UNDER YOUR CONTROL", col: C.green, lines: ["A first message to a broker waits for your tap.", "Anything about money always does."] },
+  { x: 120, kicker: "AMBIENT", col: C.slate, text: "Watches, follows up on day 3 and day 6, then stops and tells you once. Otherwise silent." },
+  { x: 680, kicker: "RELIABLE", col: C.blue, text: "Policy and guardrails are code, not prompts. Every claim is cited, every run is on the record." },
+  { x: 1240, kicker: "UNDER YOUR CONTROL", col: C.green, text: "A first message to a broker waits for your tap. Anything about money always does." },
 ];
 const promiseEls = PROMISES.map((p) => {
   const g = el("g", {}, gDeco);
-  el("rect", { x: p.x, y: 906, width: 5, height: 92, rx: 2.5, fill: p.col }, g);
-  txt(p.x + 22, 926, p.kicker, { "font-size": 17, "font-weight": 700, fill: p.col, "letter-spacing": 2.4 }, g);
-  p.lines.forEach((s, i) => txt(p.x + 22, 958 + i * 28, s, { "font-size": 20, fill: C.ink2 }, g));
+  el("rect", { x: p.x, y: 928, width: 5, height: 92, rx: 2.5, fill: p.col }, g);
+  fit(txt(p.x + 22, 948, p.kicker, { "font-size": 17, "font-weight": 700, fill: p.col, "letter-spacing": 2.4 }, g), 500);
+  wrap(p.x + 22, 980, p.text, 500, { "font-size": 20, fill: C.ink2 }, g, 28);
   return g;
 });
-// platform strip
+// platform strip, laid out by measurement
 const PLATFORM = ["Strands Agents SDK", "Amazon Bedrock AgentCore Runtime", "AgentCore Memory", "Amazon Bedrock", "SQLite", "Telegram"];
 const platEls = [];
 {
   let x = 120;
   PLATFORM.forEach((s, i) => {
-    platEls.push(txt(x, 1046, s, { "font-size": 19, fill: C.dim, class: "mono" }, gDeco));
-    x += s.length * 11.45 + 12;
-    if (i < PLATFORM.length - 1) { txt(x, 1046, "·", { "font-size": 19, fill: C.line }, gDeco); x += 26; }
+    // measured bold, since the items turn bold as the narration reaches them
+    const t = txt(x, 1054, s, { "font-size": 19, fill: C.dim, class: "mono", "font-weight": 700 }, gDeco);
+    platEls.push(t); x += measure(t) + 14; t.setAttribute("font-weight", 400);
+    if (i < PLATFORM.length - 1) { const d = txt(x, 1054, "·", { "font-size": 19, fill: C.line }, gDeco); x += measure(d) + 14; }
   });
 }
 
 // ---------------------------------------------------------------- edges (few, big)
 const EDGES = {
-  inAg:  { d: "M440,400 H528", col: C.amber, t: [0.07, 0.10], label: null },
-  agEn:  { d: "M936,400 H1000", col: C.blue, t: [0.40, 0.44] },
-  enHu:  { d: "M1408,400 H1480", col: C.green, t: [0.74, 0.78] },
-  enMem: { d: "M1204,636 V660", col: C.slate, t: [0.60, 0.63] },
-  memAg: { d: "M732,660 V636", col: C.slate, t: [0.66, 0.69] },
-  loop:  { d: "M1640,686 V872 H280 V686", col: C.slate, dashed: true, t: [0.90, 0.97] },
+  inAg:  { d: `M${120 + SIDE_W},400 H${AGENTS_X}`, col: C.amber, t: [0.07, 0.10] },
+  agEn:  { d: `M${AGENTS_X + BLOCK_W},400 H${ENGINE_X}`, col: C.blue, t: [0.40, 0.44] },
+  enHu:  { d: `M${ENGINE_X + BLOCK_W},400 H${HUMAN_X}`, col: C.green, t: [0.74, 0.78] },
+  enMem: { d: `M${ENGINE_CX},${BLOCK_BOTTOM} V${BAND_Y}`, col: C.slate, t: [0.60, 0.63] },
+  memAg: { d: `M${AGENTS_CX},${BAND_Y} V${BLOCK_BOTTOM}`, col: C.slate, t: [0.66, 0.69] },
+  loop:  { d: `M${HUMAN_CX},${BLOCK_BOTTOM} V${LOOP_Y} H280 V${BLOCK_BOTTOM}`, col: C.slate, dashed: true, t: [0.90, 0.97] },
 };
 const edgeEls = {};
 for (const [id, e] of Object.entries(EDGES)) {
@@ -185,25 +219,26 @@ for (const [id, e] of Object.entries(EDGES)) {
   const head = el("polygon", { points: "0,0 -14,-7 -14,7", fill: e.col, transform: `translate(${p2.x},${p2.y}) rotate(${ang})` }, g);
   edgeEls[id] = { g, live, head, len, e };
 }
-const edgeLabel = (x, y, s, anchor = "middle") => txt(x, y, s, { "font-size": 16, fill: C.dim, class: "mono", "text-anchor": anchor }, gDeco);
+const edgeLabel = (x, y, s, maxW, anchor = "middle") => fit(txt(x, y, s, { "font-size": 16, fill: C.dim, class: "mono", "text-anchor": anchor }, gDeco), maxW);
 const labels = [
-  edgeLabel(484, 384, "package"), edgeLabel(968, 384, "claims"), edgeLabel(1444, 384, "verdict"),
-  edgeLabel(1218, 654, "record", "start"), edgeLabel(718, 654, "recall", "end"),
-  edgeLabel(960, 862, "a reply, a price cut, a report → the whole path runs again"),
+  edgeLabel((120 + SIDE_W + AGENTS_X) / 2, 384, "package", 84), edgeLabel(GAP_X, 384, "claims", 52),
+  edgeLabel((ENGINE_X + BLOCK_W + HUMAN_X) / 2, 384, "verdict", 76),
+  edgeLabel(ENGINE_CX + 14, BAND_Y - 6, "record", 120, "start"), edgeLabel(AGENTS_CX - 14, BAND_Y - 6, "recall", 120, "end"),
+  edgeLabel(960, LOOP_Y - 10, "a reply, a price cut, a report → the whole path runs again", 900),
 ];
 
 // ---------------------------------------------------------------- animation pieces
 const motion = (d) => { const p = el("path", { d, fill: "none", stroke: "none" }, gAnim); return { p, len: p.getTotalLength() }; };
 const M = {
-  inAg: motion("M300,400 H528"), agEn: motion("M936,400 H1000"), enHu: motion("M1408,400 H1480"),
-  enMem: motion("M1204,636 V660"), loop: motion("M1640,686 V872 H280 V686"),
+  inAg: motion(`M300,400 H${AGENTS_X}`), agEn: motion(EDGES.agEn.d), enHu: motion(EDGES.enHu.d),
+  enMem: motion(EDGES.enMem.d), loop: motion(EDGES.loop.d),
 };
 const mkPacket = (col, label) => {
   const g = el("g", { opacity: 0 }, gAnim);
-  const w = label.length * 11 + 30;
+  const t = txt(0, 6, label, { "font-size": 17, "font-weight": 700, fill: "#fff", "text-anchor": "middle", class: "mono" }, g);
+  const w = measure(t) + 30;
   el("circle", { cx: -18, cy: 0, r: 22, fill: col, opacity: 0.12 }, g);
-  el("rect", { x: -w / 2, y: -17, width: w, height: 34, rx: 17, fill: col }, g);
-  txt(0, 6, label, { "font-size": 17, "font-weight": 700, fill: "#fff", "text-anchor": "middle", class: "mono" }, g);
+  g.insertBefore(el("rect", { x: -w / 2, y: -17, width: w, height: 34, rx: 17, fill: col }, g), t);
   return g;
 };
 const PK = { pkg: mkPacket(C.accent, "package"), claims: mkPacket(C.blue, "claims"), dec: mkPacket(C.green, "REVIEW"), rec: mkPacket(C.slate, "run #42"), reply: mkPacket(C.slate, "price cut") };
@@ -211,25 +246,28 @@ const place = (g, m, u) => { const pt = m.p.getPointAtLength(clamp01(u) * m.len)
 const hide = (g) => g.setAttribute("opacity", 0);
 const mkChip = (x, y, s, col) => {
   const g = el("g", { opacity: 0 }, gAnim);
-  const w = s.length * 10.2 + 30;
-  el("rect", { x, y, width: w, height: 38, rx: 10, fill: "#fff", stroke: col, "stroke-width": 1.5 }, g);
+  const t = txt(x + 17, y + 25, s, { "font-size": 18, fill: C.ink2, class: "mono" }, g);
+  const w = measure(t) + 34;
+  g.insertBefore(el("rect", { x, y, width: w, height: 38, rx: 10, fill: "#fff", stroke: col, "stroke-width": 1.5 }, g), t);
   el("rect", { x, y, width: 5, height: 38, rx: 2.5, fill: col }, g);
-  txt(x + 17, y + 25, s, { "font-size": 18, fill: C.ink2, class: "mono" }, g);
   return g;
 };
 const CH = {
-  claim: mkChip(528, 186, "cap rate 8.0% · p.3  →  6.4% on my numbers", C.amber),
-  gate: mkChip(1000, 186, "clears at $1.29M · REVIEW", C.blue),
-  skp: mkChip(528, 186, "unsupported: roof age · Phase I · CAM", C.amber),
-  mem: mkChip(1000, 826, "You previously: passed at $1.29M", C.slate),
-  tap: mkChip(1508, 690, "Approve and send  ✓", C.green),
-  money: mkChip(1508, 690, "credit request: waits for you", C.green),
+  claim: mkChip(AGENTS_X, 186, "cap rate 8.0% · p.3  →  6.4% on my numbers", C.amber),
+  gate: mkChip(ENGINE_X, 186, "clears at $1.29M · REVIEW", C.blue),
+  skp: mkChip(AGENTS_X, 186, "unsupported: roof age · Phase I · CAM", C.amber),
+  mem: mkChip(BAND_X + halfW + 30, BAND_Y + BAND_H + 6, "You previously: passed at $1.29M", C.slate),
+  tap: mkChip(HUMAN_X + 28, BLOCK_BOTTOM + 12, "Approve and send  ✓", C.green),
+  money: mkChip(HUMAN_X + 28, BLOCK_BOTTOM + 12, "credit request: waits for you", C.green),
 };
-const ripple = el("circle", { cx: 1640, cy: 500, r: 0, fill: "none", stroke: C.green, "stroke-width": 3, opacity: 0 }, gAnim);
+const ripple = el("circle", { cx: HUMAN_CX, cy: 500, r: 0, fill: "none", stroke: C.green, "stroke-width": 3, opacity: 0 }, gAnim);
 const boundary = el("g", { opacity: 0 }, gAnim);
-el("rect", { x: 966, y: 236, width: 4, height: 400, rx: 2, fill: C.accent }, boundary);
-el("rect", { x: 848, y: 560, width: 240, height: 34, rx: 8, fill: C.accent }, boundary);
-txt(968, 584, "judgment ends here", { "font-size": 17, "font-weight": 700, fill: "#fff", "text-anchor": "middle", class: "mono" }, boundary);
+el("rect", { x: GAP_X - 2, y: BLOCK_Y, width: 4, height: BLOCK_H, rx: 2, fill: C.accent }, boundary);
+{
+  const t = txt(GAP_X, 604, "judgment ends here", { "font-size": 17, "font-weight": 700, fill: "#fff", "text-anchor": "middle", class: "mono" }, boundary);
+  const w = measure(t) + 36;
+  boundary.insertBefore(el("rect", { x: GAP_X - w / 2, y: 580, width: w, height: 34, rx: 8, fill: C.accent }, boundary), t);
+}
 const chip = (g, f, a, b) => { const o = Math.min(win(f, a, a + 0.012), 1 - win(f, b - 0.012, b)); g.setAttribute("opacity", o); g.setAttribute("transform", `translate(0,${(1 - ease(win(f, a, a + 0.012))) * 8})`); };
 
 // ---------------------------------------------------------------- timeline (fractions of the block's narration)
@@ -249,20 +287,16 @@ function setBlock(be, lit, hot) {
 function render(f) {
   f = clamp01(f);
   const STATIC = f >= 1;
-  // scaffolding
   cloud.setAttribute("opacity", ease(win(f, 0.0, 0.04)));
   legend.setAttribute("opacity", ease(win(f, 0.0, 0.03)));
-  const order = ["intake", "agents", "engine", "human"];
-  order.forEach((id, i) => {
+  ["intake", "agents", "engine", "human"].forEach((id, i) => {
     const be = blockEls[id];
     be.g.setAttribute("opacity", ease(win(f, 0.01 + i * 0.008, 0.045 + i * 0.008)));
     const t0 = LIT[id];
-    const hot = f >= t0 ? 1 - win(f, t0, t0 + 0.03) : 0;
-    setBlock(be, f >= t0, hot);
+    setBlock(be, f >= t0, f >= t0 ? 1 - win(f, t0, t0 + 0.03) : 0);
   });
   band.setAttribute("opacity", ease(win(f, 0.04, 0.075)));
-  const memLit = f >= 0.63;
-  ledgerTitle.setAttribute("fill", memLit ? C.slate : C.ink);
+  ledgerTitle.setAttribute("fill", f >= 0.63 ? C.slate : C.ink);
   memTitle.setAttribute("fill", f >= 0.69 ? C.slate : C.ink);
   band.setAttribute("transform", `translate(0,${-4 * (f >= 0.63 ? 1 - win(f, 0.63, 0.66) : 0)})`);
   promiseEls.forEach((g, i) => g.setAttribute("opacity", ease(win(f, 0.05 + i * 0.01, 0.085 + i * 0.01))));
@@ -272,34 +306,29 @@ function render(f) {
     const lit = f >= 0.89 + i * 0.017;
     t.setAttribute("fill", lit ? C.ink : C.dim); t.setAttribute("font-weight", lit ? 700 : 400);
   });
-  // the platform label gets its beat at the end
   const platBeat = f >= 0.905 && f < 0.99;
-  cloudLabel.querySelector("rect").setAttribute("stroke", platBeat ? C.ink2 : C.cloudLine);
-  cloudLabel.querySelector("rect").setAttribute("stroke-width", platBeat ? 2.5 : 1.5);
+  pillRect.setAttribute("stroke", platBeat ? C.ink2 : C.cloudLine);
+  pillRect.setAttribute("stroke-width", platBeat ? 2.5 : 1.5);
   cloudNote.setAttribute("fill", platBeat ? C.ink2 : C.dim);
-  // edges
   Object.values(edgeEls).forEach((ee) => {
     ee.g.setAttribute("opacity", ease(win(f, 0.05, 0.08)));
     const u = win(f, ee.e.t[0], ee.e.t[1]);
     if (ee.e.dashed) ee.live.setAttribute("opacity", u); else ee.live.setAttribute("stroke-dashoffset", ee.len * (1 - u));
     ee.head.setAttribute("opacity", u >= 0.98 ? 1 : 0);
   });
-  // packets
   Object.values(PK).forEach(hide);
   if (f >= 0.06 && f < 0.10) place(PK.pkg, M.inAg, ease(win(f, 0.06, 0.10)));
   if (f >= 0.40 && f < 0.44) place(PK.claims, M.agEn, ease(win(f, 0.40, 0.44)));
   if (f >= 0.60 && f < 0.63) place(PK.rec, M.enMem, ease(win(f, 0.60, 0.63)));
   if (f >= 0.74 && f < 0.78) place(PK.dec, M.enHu, ease(win(f, 0.74, 0.78)));
   if (f >= 0.90 && f < 0.97) place(PK.reply, M.loop, ease(win(f, 0.90, 0.97)));
-  // chips and beats
   chip(CH.claim, f, 0.14, 0.29);
   chip(CH.skp, f, 0.61, 0.67);
   chip(CH.gate, f, 0.47, 0.60);
   chip(CH.mem, f, 0.70, 0.78);
   chip(CH.tap, f, 0.80, 0.845);
   chip(CH.money, f, 0.85, 0.89);
-  const bnd = win(f, 0.36, 0.372) * (1 - win(f, 0.44, 0.452));
-  boundary.setAttribute("opacity", bnd);
+  boundary.setAttribute("opacity", win(f, 0.36, 0.372) * (1 - win(f, 0.44, 0.452)));
   const ru = win(f, 0.795, 0.83);
   ripple.setAttribute("opacity", ru > 0 && ru < 1 ? (1 - ru) * 0.9 : 0);
   ripple.setAttribute("r", ru > 0 && ru < 1 ? 10 + 60 * ease(ru) : 0);
@@ -316,7 +345,6 @@ window.play = () => {
   rafId = requestAnimationFrame(tick);
 };
 window.renderStatic = () => { window.pause(); render(1); };
-const q = new URLSearchParams(location.search);
 if (q.get("static") === "1") window.renderStatic(); else if (q.get("autoplay") !== "0") window.play(); else render(0);
 })();
 </script>

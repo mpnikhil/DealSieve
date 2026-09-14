@@ -28,9 +28,9 @@ Terms, for readers outside real estate: the cap rate is the annual return on the
 
 ## How it works
 
-![DealSieve architecture: broker packages flow through Strands agents that read and judge, a deterministic engine that does every dollar of math and screens outbound mail, and a human who approves anything sent and everything about money](architecture/architecture.png)
+![DealSieve at a glance: an ambient intake watches the inbox; Strands agents read and judge; a deterministic engine does the math and holds the guardrails; a human approves every first message and anything about money; an append-only ledger and AgentCore Memory underneath, all on Amazon Bedrock AgentCore Runtime](architecture/architecture.png)
 
-*Amber: agent judgment. Blue: deterministic, tested code. Green: the human. The animated version is [architecture/diagram.html](architecture/diagram.html); open it in a browser.*
+*Amber: the agents judge. Blue: code decides. Green: you approve. The animated version is [architecture/overview.html](architecture/overview.html); open it in a browser. A node-level flowchart is in [architecture/diagram.html](architecture/diagram.html).*
 
 **Model discretion vs. deterministic code.** The Strands agents perform tasks that require judgment, such as reading a messy email, a 40-page OM, or a condition report with photos. They identify claims, cite the page or photo for each, and determine which claims are unsupported and material. All subsequent steps are executed by code. The tool order is fixed, every gate evaluates within the tool body, and a safety net runs any step the model skips. The credit amount is determined by frontier arithmetic, and diligence questions are reconciled against the Skeptic's list. If the model called no tools after extraction, the outcome would be identical. The system acts as the agent, with the LLM serving as a perception and judgment component.
 

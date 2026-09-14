@@ -1,10 +1,11 @@
 # DealSieve architecture
 
-Image: [`architecture.png`](architecture.png), exported from [`diagram.html`](diagram.html).
+Image: [`architecture.png`](architecture.png), exported from [`overview.html`](overview.html), the system at a glance.
 Open the HTML in a browser to watch one deal move through the system; add `?static=1` for the still.
-Export again with Playwright: `python architecture/render_diagram.py --static architecture/architecture.png` (needs Playwright with Chromium).
+[`diagram.html`](diagram.html) is the node-level flowchart of the same system.
+Export again with Playwright: `python architecture/render_diagram.py --page architecture/overview.html --static architecture/architecture.png` (needs Playwright with Chromium).
 
-The diagram reads left to right in three lanes plus a strip underneath. The colours are the
+The overview has four blocks, a memory band, and three promises underneath. The colours are the
 boundaries that matter:
 
 - **Amber, reads and judges (Strands agents).** The Acquisition Agent turns a broker email, an
