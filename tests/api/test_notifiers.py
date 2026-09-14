@@ -135,7 +135,11 @@ def test_telegram_notifier_request_shape() -> None:
     assert call["url"] == "https://api.telegram.org/bottok123/sendMessage"
     payload = call["json"]
     assert payload["chat_id"] == "chat-9"
-    assert payload["text"] == f"{notification.title}\n\n{notification.body}"
+    assert payload["parse_mode"] == "HTML"
+    assert payload["text"] == (
+        "<b>DEAL #101 JUST BECAME INVESTABLE</b>\n"
+        "line one\nline two"
+    )
 
     keyboard = payload["reply_markup"]["inline_keyboard"]
     assert len(keyboard) == 1
@@ -163,12 +167,49 @@ def test_telegram_notifier_uses_draft_ids_for_approve_and_reject() -> None:
 
     notifier.send(notification)
 
-    buttons = fake_client.calls[0]["json"]["reply_markup"]["inline_keyboard"][0]
-    assert [button["callback_data"] for button in buttons] == [
-        "approve:drf_abc123",
+    rows = fake_client.calls[0]["json"]["reply_markup"]["inline_keyboard"]
+    assert [[button["callback_data"] for button in row] for row in rows] == [
+        ["approve:drf_abc123"],
+        [
         "reject:drf_abc123",
         "ignore:opp_123",
         "review:opp_123",
+        ],
+    ]
+
+
+def test_telegram_notifier_renders_draft_outside_monospace_block() -> None:
+    fake_client = _FakeClient({"result": {"message_id": 42}})
+    notifier = TelegramNotifier(token="tok", chat_id="chat", client=fake_client)
+    notification = _notification(
+        body=(
+            "Power Inn\n\nPrice            $1,550,000 -> $1,250,000\n\n"
+            "Draft to maya@example.com\n"
+            "Subject: Diligence questions: Power Inn\n\n"
+            "Hi Maya,\n\nCould you send the roof report?"
+        ),
+        actions=[
+            NotificationAction(label="Approve and send", action="approve"),
+            NotificationAction(label="Reject", action="reject"),
+            NotificationAction(label="Mark for review", action="review"),
+        ],
+    )
+    object.__setattr__(notification, "_telegram_draft_id", "drf_abc123")
+
+    notifier.send(notification)
+
+    payload = fake_client.calls[0]["json"]
+    assert payload["text"] == (
+        "<b>DEAL #101 JUST BECAME INVESTABLE</b>\n"
+        "Power Inn\n\nPrice            $1,550,000 -&gt; $1,250,000\n"
+        "<b>Draft to maya@example.com</b>\n"
+        "<b>Subject: Diligence questions: Power Inn</b>\n"
+        "Hi Maya,\n\nCould you send the roof report?"
+    )
+    assert payload["parse_mode"] == "HTML"
+    assert [[button["text"] for button in row] for row in payload["reply_markup"]["inline_keyboard"]] == [
+        ["Approve and send"],
+        ["Reject", "Mark for review"],
     ]
 
 

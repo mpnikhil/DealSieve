@@ -8,7 +8,6 @@ notifier can render it as a text row inside its box.
 
 from __future__ import annotations
 
-import re
 from decimal import Decimal
 
 from dealsieve.schemas import (
@@ -40,6 +39,7 @@ def _memory_line(memories: list[MemoryHit] | None) -> str | None:
 _LABEL_WIDTH = 17
 _VALUE_WIDTH = 17
 _MAX_UNRESOLVED = 4
+_DRAFT_BODY_LIMIT = 1_500
 
 _ACTIONS: list[NotificationAction] = [
     NotificationAction(label="Review", action="review"),
@@ -47,10 +47,10 @@ _ACTIONS: list[NotificationAction] = [
     NotificationAction(label="Ignore", action="ignore"),
 ]
 
-_PENDING_REQUEST_ACTIONS: list[NotificationAction] = [
-    NotificationAction(label="Review", action="review"),
-    NotificationAction(label="Approve broker questions", action="approve"),
-    NotificationAction(label="Ignore", action="ignore"),
+_DRAFT_ACTIONS: list[NotificationAction] = [
+    NotificationAction(label="Approve and send", action="approve"),
+    NotificationAction(label="Reject", action="reject"),
+    NotificationAction(label="Mark for review", action="review"),
 ]
 
 
@@ -63,6 +63,19 @@ def _with_draft_target(notification: Notification, draft: OutboundDraft | None) 
     if draft is not None:
         object.__setattr__(notification, "_telegram_draft_id", draft.draft_id)
     return notification
+
+
+def _draft_lines(draft: OutboundDraft) -> list[str]:
+    """Render the exact outbound message, bounded so one alert fits on a phone."""
+    body = draft.body
+    if len(body) > _DRAFT_BODY_LIMIT:
+        body = body[: _DRAFT_BODY_LIMIT - 4].rstrip() + "\n..."
+    return [
+        f"Draft to {draft.to_email or 'the broker'}",
+        f"Subject: {draft.subject}",
+        "",
+        body,
+    ]
 
 
 def _money(value: Decimal) -> str:
@@ -157,21 +170,19 @@ def format_threshold_alert(
         if overflow:
             lines.append(f"- +{len(overflow)} more in the dashboard")
 
-    if (
+    draft_for_approval = (
         pending_request is not None
         and pending_request.kind == "information_request"
         and pending_request.status == "pending"
-    ):
-        lines.append("")
-        lines.append(
-            "Awaiting your approval: information request to the broker "
-            f"({len(pending_request.questions)} questions)"
-        )
+    )
 
     memory_line = _memory_line(memories)
     if memory_line is not None:
         lines.append("")
         lines.append(memory_line)
+
+    if draft_for_approval:
+        lines.extend(["", *_draft_lines(pending_request)])
 
     body = "\n".join(lines)
 
@@ -181,9 +192,9 @@ def format_threshold_alert(
         channel=channel,
         title=title,
         body=body,
-        actions=list(_PENDING_REQUEST_ACTIONS if pending_request is not None else _ACTIONS),
+        actions=list(_DRAFT_ACTIONS if draft_for_approval else _ACTIONS),
     )
-    return _with_draft_target(notification, pending_request)
+    return _with_draft_target(notification, pending_request if draft_for_approval else None)
 
 
 def _finding_lines(analysis: DocumentAnalysis, limit: int = 3, width: int = 96) -> list[str]:
@@ -280,15 +291,13 @@ def format_fell_below_alert(
         distance = new_run.viability.distance_pct
         suffix = f", {_pct(distance, decimals=1)} under the ask" if distance is not None else ""
         lines.append(f"Viable below {_money(frontier)}{suffix}")
-    if credit_draft is not None:
-        amount_match = re.search(r"\$[\d,]+", credit_draft.body)
-        amount = amount_match.group(0) if amount_match else "the required"
-        lines.extend(["", f"Drafted for your approval: request a {amount} credit."])
-
     memory_line = _memory_line(memories)
     if memory_line is not None:
         lines.append("")
         lines.append(memory_line)
+
+    if credit_draft is not None:
+        lines.extend(["", *_draft_lines(credit_draft)])
 
     notification = Notification(
         opportunity_id=opportunity.opportunity_id,
@@ -296,11 +305,11 @@ def format_fell_below_alert(
         channel=channel,
         title=f"DEAL #{opportunity.deal_number} FELL BACK BELOW THRESHOLD",
         body="\n".join(lines),
-        actions=[
-            NotificationAction(label="Review", action="review"),
-            NotificationAction(label="Approve", action="approve"),
-            NotificationAction(label="Reject", action="reject"),
-        ],
+        actions=list(
+            _DRAFT_ACTIONS
+            if credit_draft is not None
+            else [NotificationAction(label="Mark for review", action="review")]
+        ),
     )
     return _with_draft_target(notification, credit_draft)
 

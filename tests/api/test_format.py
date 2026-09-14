@@ -296,7 +296,7 @@ def test_threshold_alert_carries_exact_pending_draft_target() -> None:
         opportunity_id=opportunity.opportunity_id,
         to_email="broker@example.com",
         subject="Diligence questions: Power Inn",
-        body="Questions",
+        body="Hi Maya,\n\nCould you send the roof report?\n\nThanks,\nNikhil",
         questions=["Roof age?"],
     )
 
@@ -310,10 +310,44 @@ def test_threshold_alert_carries_exact_pending_draft_target() -> None:
 
     assert notification.__dict__["_telegram_draft_id"] == "drf_questions"
     assert [action.action for action in notification.actions] == [
-        "review",
         "approve",
-        "ignore",
+        "reject",
+        "review",
     ]
+    assert [action.label for action in notification.actions] == [
+        "Approve and send",
+        "Reject",
+        "Mark for review",
+    ]
+    assert notification.body.endswith(
+        "Draft to broker@example.com\n"
+        "Subject: Diligence questions: Power Inn\n\n"
+        "Hi Maya,\n\nCould you send the roof report?\n\nThanks,\nNikhil"
+    )
+
+
+def test_threshold_alert_caps_included_draft_body() -> None:
+    opportunity = _opportunity()
+    run = _run(
+        price=Decimal("1250000"),
+        cap_rate=Decimal("0.0827"),
+        dscr=Decimal("1.43"),
+        status=OpportunityStatus.REVIEW,
+        cap_passed=True,
+        dscr_passed=True,
+    )
+    draft = OutboundDraft(
+        opportunity_id=opportunity.opportunity_id,
+        to_email="broker@example.com",
+        subject="Diligence questions: Power Inn",
+        body="x" * 2_000,
+    )
+
+    notification = format_threshold_alert(opportunity, None, run, None, pending_request=draft)
+
+    included = notification.body.split("\n\nDraft to ", 1)[1]
+    assert len(included) < 1_700
+    assert notification.body.endswith("\n...")
 
 
 def test_format_threshold_alert_omits_previously_failed_line_with_prior_structural_failure() -> None:

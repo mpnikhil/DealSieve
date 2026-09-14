@@ -42,7 +42,7 @@ Keeping the model out of the arithmetic while letting it drive the workflow was 
 - A viability solver that computes a specific, monitorable target price for rejected deals.
 - A tool-gated multi-agent system where the properties that make a hackathon demo scary — the model hallucinating a pass, doing unchecked arithmetic, or double-notifying a human — are structurally impossible.
 - An end-to-end 3-act story (WATCH -> REVIEW -> Diligence & Condition Report -> Capex adjustment & price-credit negotiation) fully tested (`tests/e2e/test_watch_to_review.py` and `tests/e2e/test_diligence_loop.py`) and reproducible offline in 3 seconds.
-- 304 passing tests covering gate boundaries, the amortization schedule, the property-tax reset, bisection convergence on the viability frontier, stress scenarios, identity resolution, evidence-conflict preservation, multimodal document inspection, and the diligence follow-up loop.
+- 493 passing tests covering gate boundaries, the amortization schedule, the property-tax reset, bisection convergence on the viability frontier, stress scenarios, identity resolution, evidence-conflict preservation, multimodal document inspection, and the diligence follow-up loop.
 
 ## What we learned
 
@@ -52,8 +52,8 @@ Deterministic-first agent design improves testability. Because the arithmetic an
 
 Next steps include monitoring broker emails at mailbox scale, pulling listings from crawl and API sources, and building an off-market owner universe from assessor data. We plan to add loan-rate and seller-financing monitoring as additional axes on the viability-frontier machinery. Market-rent and transaction comps will help check normalized NOI against external data. The core primitive of persistent opportunity state, deterministic policy, and monitored thresholds could also be applied outside commercial real estate to small-business, franchise, private-credit, and equipment acquisitions.
 
-**On AgentCore**: the entrypoint (`dealsieve/agentcore_app.py`) is written and verified locally (`python -m dealsieve.agentcore_app` + `curl localhost:8080/invocations`), but has not been deployed to AWS — there were no AWS credentials available on the build machine during the hackathon. The deployment steps (`agentcore configure --entrypoint dealsieve/agentcore_app.py` && `agentcore launch` via the `bedrock-agentcore-starter-toolkit`) are documented in the README and are the next thing we'd run given credentials.
+**On AgentCore**: the same application pipeline is wrapped by `dealsieve/agentcore_app.py` and successfully deployed to Amazon Bedrock AgentCore Runtime in `us-west-2`. The deployed runtime passed a status invocation, recorded in the repository's immutable deployment ledger. The full Strands `BedrockModel` inference path is implemented; the selected model currently has zero on-demand token throughput on this new AWS account, so cloud model inference awaits account quota availability. That limit does not affect the successful AgentCore deployment or the fully reproducible scripted test and demo path.
 
 ## Built with
 
-Python 3.12 · Strands Agents SDK · Pydantic · SQLite · FastAPI · Vite · React · TypeScript · Tailwind CSS · `claude`/`codex`/`agy` CLIs (local model backend) · AWS Bedrock AgentCore SDK (entrypoint written, not yet deployed) · Telegram Bot API
+Python 3.12 · Strands Agents SDK · Pydantic · SQLite · FastAPI · Vite · React · TypeScript · Tailwind CSS · `claude`/`codex`/`agy` CLIs (local model backend) · Amazon Bedrock AgentCore Runtime (deployed) · Amazon Bedrock model backend · Telegram Bot API

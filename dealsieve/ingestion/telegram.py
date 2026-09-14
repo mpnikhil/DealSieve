@@ -172,8 +172,10 @@ class TelegramBot:
                 self._answer_callback(callback_id, "Approved and sent.")
                 self._send_text(chat_id, f"Sent to {sent.to_email or 'the broker'}: {sent.subject}")
             elif action == "reject":
+                draft = self.repo.get_draft(target_id)
                 reject_draft(target_id, repo=self.repo, principal=principal)
-                self._answer_callback(callback_id, "Rejected.")
+                subject = draft.subject if draft is not None else "broker message"
+                self._answer_callback(callback_id, f"Rejected: {subject}")
             elif action in ("review", "ignore"):
                 # Review/ignore buttons target the opportunity, not a specific notification (see
                 # module docstring), so the most recently created notification for it is the best
@@ -190,7 +192,7 @@ class TelegramBot:
                     notification=notification,
                     action=action,  # type: ignore[arg-type]
                 )
-                self._answer_callback(callback_id, "Noted." if action == "ignore" else "Opening review.")
+                self._answer_callback(callback_id, "Noted." if action == "ignore" else "Marked for review.")
             else:
                 self._answer_callback(callback_id)
         except Exception as exc:
@@ -217,6 +219,14 @@ class TelegramBot:
                 self._handle_deal(chat_id, parts[1])
             else:
                 self._send_text(chat_id, "Usage: /deal <number>")
+            return
+
+        if os.environ.get("DEALSIEVE_MODEL_BACKEND", "cli") == "scripted" and document is None:
+            self._send_text(
+                chat_id,
+                "I'm running in offline demo mode, so I only process the demo emails right now. "
+                "Alerts and the Approve / Reject buttons work as normal.",
+            )
             return
 
         try:

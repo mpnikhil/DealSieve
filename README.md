@@ -2,7 +2,7 @@
 
 **The acquisitions agent for small-bay industrial buyers. It underwrites every broker OM on your numbers, keeps a clearing price on every pass and re-underwrites when the facts change, and works the deals that clear through diligence. You keep the money decisions.**
 
-Built with the [Strands Agents SDK](https://strandsagents.com/) for the AWS *Agents for Humans* hackathon (Professional Agents track). Deployed to Bedrock AgentCore Runtime; runs fully offline too. 491 tests.
+Built with the [Strands Agents SDK](https://strandsagents.com/) for the AWS *Agents for Humans* hackathon (Professional Agents track). Deployed to Bedrock AgentCore Runtime; runs fully offline too. 493 tests.
 
 ## The story, with real numbers
 
@@ -38,6 +38,16 @@ flowchart TD
     TG --> IM
     URLIN --> IM
 
+    subgraph AWS["AWS services"]
+        AC["Amazon Bedrock AgentCore Runtime\nDEPLOYED · us-west-2\nhosts the same process_inbound pipeline"]
+        BR["Amazon Bedrock\nStrands BedrockModel backend\nimplemented · account quota pending"]
+        AM["Amazon Bedrock AgentCore Memory\noptional memory adapter"]
+        SES["Amazon SES\noptional email transport"]
+    end
+
+    AC -->|"email / text invocation"| IM
+    SES -."inbound email".-> EM
+
     subgraph LLM["LLM territory — Strands Agents SDK"]
         MP["Model provider\nCLIModel · BedrockModel · AnthropicModel · ScriptedModel\n(swapped by env var, zero code change)"]
         AA["Acquisition Agent\nextracts claims with provenance,\nfollows a fixed tool-call procedure"]
@@ -49,6 +59,7 @@ flowchart TD
     end
 
     IM --> AA
+    MP -."configured provider".-> BR
 
     subgraph DET["Deterministic code — Python, tested, enforces every gate"]
         RC["record_claims\nidentity resolve + evidence store + reconcile"]
@@ -77,6 +88,8 @@ flowchart TD
     DIL --> DB
     OBX --> DB
     NH --> DB
+    DB -."optional memory sync".-> AM
+    OBX -."optional delivery".-> SES
 
     subgraph OUT["Interfaces"]
         DASH["Dashboard\nFastAPI + React"]
@@ -96,11 +109,13 @@ flowchart TD
     classDef det fill:#e0f2ff,stroke:#2f7ed8,color:#0d3a66;
     classDef human fill:#fff1d6,stroke:#e08a00,color:#6b4400;
     classDef store fill:#eeeeee,stroke:#666666,color:#222222;
+    classDef aws fill:#e7f7ec,stroke:#26834a,color:#124b2b;
 
     class MP,AA,SK,INSP llm;
     class RC,UW,RSR,DBQ,DIL,OBX,NH det;
     class H human;
     class DB store;
+    class AC,BR,AM,SES aws;
 ```
 
 **Model discretion vs. deterministic code.** The Strands agents perform tasks that require judgment, such as reading a messy email, a 40-page OM, or a condition report with photos. They identify claims, cite the page or photo for each, and determine which claims are unsupported and material. All subsequent steps are executed by code. The tool order is fixed, every gate evaluates within the tool body, and a safety net runs any step the model skips. The credit amount is determined by frontier arithmetic, and diligence questions are reconciled against the Skeptic's list. If the model called no tools after extraction, the outcome would be identical. The system acts as the agent, with the LLM serving as a perception and judgment component.
@@ -155,7 +170,7 @@ Other settings, all in `.env.example`: database path, policy path, notifier (`co
 
 ## Deployment
 
-**AgentCore.** `dealsieve/agentcore_app.py` wraps the same pipeline in a `BedrockAgentCoreApp`; deployed to Bedrock AgentCore Runtime in us-west-2 (see the immutable [`deploys/LEDGER.tsv`](deploys/LEDGER.tsv)). Redeploy with `agentcore configure --entrypoint dealsieve/agentcore_app.py --requirements-file requirements-agentcore.txt && agentcore launch`, then `scripts/log_deploy.sh`. Local check: `python -m dealsieve.agentcore_app` and `curl -X POST localhost:8080/invocations -d '{"type":"status"}'`.
+**AgentCore.** `dealsieve/agentcore_app.py` wraps the same pipeline in a `BedrockAgentCoreApp`; it is successfully deployed to Bedrock AgentCore Runtime in us-west-2, where a status invocation passed (see the immutable [`deploys/LEDGER.tsv`](deploys/LEDGER.tsv)). The full Strands `BedrockModel` path is implemented, but the selected model currently has zero on-demand token throughput on this new AWS account; that account quota affects model inference, not the successful AgentCore deployment. Redeploy with `agentcore configure --entrypoint dealsieve/agentcore_app.py --requirements-file requirements-agentcore.txt && agentcore launch`, then `scripts/log_deploy.sh`. Local check: `python -m dealsieve.agentcore_app` and `curl -X POST localhost:8080/invocations -d '{"type":"status"}'`.
 
 **Telegram.** Set the notifier to `telegram` with a bot token and chat id; alerts arrive with inline Approve / Reject buttons, and `dealsieve telegram-bot` long-polls for replies, documents and button presses. Without a token, the console notifier prints the same alert.
 

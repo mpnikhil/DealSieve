@@ -3,7 +3,7 @@
 Rendered image: [`architecture.png`](architecture.png) (generated from `architecture.mmd` via
 `npx -y @mermaid-js/mermaid-cli -i architecture/architecture.mmd -o architecture/architecture.png -w 1600 -b white`).
 
-Three boundaries are color-coded in the diagram:
+Four boundaries are color-coded in the diagram:
 
 - **LLM territory (purple)** — the Strands Acquisition Agent and the independent Skeptic Agent. This
   is where ambiguity lives: reading a messy email or OM and turning it into structured claims, or
@@ -16,6 +16,9 @@ Three boundaries are color-coded in the diagram:
   call the tool and read back what the tool decided.
 - **Human (orange)** — the only actor who can approve a draft, reject it, or send anything to a
   broker. Nothing crosses this line automatically.
+- **AWS services (green)** — the deployed Amazon Bedrock AgentCore Runtime plus the implemented
+  Bedrock model, AgentCore Memory and Amazon SES integration points. Dashed lines identify optional
+  adapters rather than claiming they are required for local execution.
 
 SQLite sits underneath as the immutable record (events and underwriting runs are append-only; the
 `Opportunity` row is the only mutable, derived projection of that history). The dashboard and the
@@ -35,6 +38,16 @@ flowchart TD
     TG --> IM
     URLIN --> IM
 
+    subgraph AWS["AWS services"]
+        AC["Amazon Bedrock AgentCore Runtime\nDEPLOYED · us-west-2\nhosts the same process_inbound pipeline"]
+        BR["Amazon Bedrock\nStrands BedrockModel backend\nimplemented · account quota pending"]
+        AM["Amazon Bedrock AgentCore Memory\noptional memory adapter"]
+        SES["Amazon SES\noptional email transport"]
+    end
+
+    AC -->|"email / text invocation"| IM
+    SES -."inbound email".-> EM
+
     subgraph LLM["LLM territory — Strands Agents SDK"]
         MP["Model provider\nCLIModel · BedrockModel · AnthropicModel · ScriptedModel\n(swapped by env var, zero code change)"]
         AA["Acquisition Agent\nextracts claims with provenance,\nfollows a fixed tool-call procedure"]
@@ -46,6 +59,7 @@ flowchart TD
     end
 
     IM --> AA
+    MP -."configured provider".-> BR
 
     subgraph DET["Deterministic code — Python, tested, enforces every gate"]
         RC["record_claims\nidentity resolve + evidence store + reconcile"]
@@ -74,6 +88,8 @@ flowchart TD
     DIL --> DB
     OBX --> DB
     NH --> DB
+    DB -."optional memory sync".-> AM
+    OBX -."optional delivery".-> SES
 
     subgraph OUT["Interfaces"]
         DASH["Dashboard\nFastAPI + React"]
@@ -93,9 +109,11 @@ flowchart TD
     classDef det fill:#e0f2ff,stroke:#2f7ed8,color:#0d3a66;
     classDef human fill:#fff1d6,stroke:#e08a00,color:#6b4400;
     classDef store fill:#eeeeee,stroke:#666666,color:#222222;
+    classDef aws fill:#e7f7ec,stroke:#26834a,color:#124b2b;
 
     class MP,AA,SK,INSP llm;
     class RC,UW,RSR,DBQ,DIL,OBX,NH det;
     class H human;
     class DB store;
+    class AC,BR,AM,SES aws;
 ```
