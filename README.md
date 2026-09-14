@@ -23,102 +23,14 @@ Terms, for readers outside real estate: the cap rate is the annual return on the
 
 - **A standing opinion.** Every opportunity is a permanent record with an immutable event history and immutable underwriting runs.
 - **A calculated counterfactual.** For every rejection, DealSieve solves for the price at which every gate would pass and names the binding constraint.
+- **No emotion in the answer.** The policy is frozen and versioned by content hash. A building you have fallen for has to clear the same numbers as every other one, so the system never talks you into a bad buy.
 - **Minimal notifications.** Rejecting 71 of 84 deals produces zero notifications. You hear from it when a monitored condition changes the answer, when diligence alters the result, or when the broker stops answering.
 
 ## How it works
 
-```mermaid
-flowchart TD
-    subgraph CH["Channels"]
-        EM["Email\n(.eml / SES)"]
-        TG["Telegram"]
-        URLIN["URL paste"]
-    end
+![DealSieve architecture: broker packages flow through Strands agents that read and judge, a deterministic engine that does every dollar of math and screens outbound mail, and a human who approves anything sent and everything about money](architecture/architecture.png)
 
-    IM["InboundMessage\nchannel-agnostic"]
-    EM --> IM
-    TG --> IM
-    URLIN --> IM
-
-    subgraph AWS["AWS services"]
-        AC["Amazon Bedrock AgentCore Runtime\nDEPLOYED · us-west-2\nhosts the same process_inbound pipeline"]
-        BR["Amazon Bedrock\nStrands BedrockModel backend\nimplemented · account quota pending"]
-        AM["Amazon Bedrock AgentCore Memory\noptional memory adapter"]
-        SES["Amazon SES\noptional email transport"]
-    end
-
-    AC -->|"email / text invocation"| IM
-    SES -."inbound email".-> EM
-
-    subgraph LLM["LLM territory — Strands Agents SDK"]
-        MP["Model provider\nCLIModel · BedrockModel · AnthropicModel · ScriptedModel\n(swapped by env var, zero code change)"]
-        AA["Acquisition Agent\nextracts claims with provenance,\nfollows a fixed tool-call procedure"]
-        SK["Skeptic Agent\nindependent second opinion,\nstructured_output_model=SkepticOutput"]
-        INSP["Inspector Agent\nmultimodal: text + photos"]
-        AA -.uses.- MP
-        SK -.uses.- MP
-        INSP -.uses.- MP
-    end
-
-    IM --> AA
-    MP -."configured provider".-> BR
-
-    subgraph DET["Deterministic code — Python, tested, enforces every gate"]
-        RC["record_claims\nidentity resolve + evidence store + reconcile"]
-        UW["underwrite\ndeterministic finance engine\n+ immutable policy + viability solver"]
-        RSR["request_skeptic_review\n(only when status = REVIEW)"]
-        DBQ["request_diligence\n(only after a skeptic report)"]
-        DIL["Diligence Loop\nrequest_diligence -> DiligenceRequest\nfollow-up scheduler · match answers\nimmediate capex -> re-underwrite"]
-        OBX["Outbox\nfile / SMTP / SES\npolicy screen"]
-        NH["notify_human\n(threshold crossing, or diligence stalled)"]
-    end
-
-    AA -->|"tool call"| RC --> UW --> RSR
-    AA -.->|"analyze_document"| INSP
-    INSP -->|"resolves"| DIL
-    RSR -->|invokes| SK
-    SK -->|verdict + concerns| DBQ --> DIL
-    DIL --> OBX
-    DIL --> NH
-    DBQ --> NH
-
-    DB[("SQLite\nimmutable events · immutable underwriting runs\nderived opportunity state")]
-    RC --> DB
-    UW --> DB
-    RSR --> DB
-    DBQ --> DB
-    DIL --> DB
-    OBX --> DB
-    NH --> DB
-    DB -."optional memory sync".-> AM
-    OBX -."optional delivery".-> SES
-
-    subgraph OUT["Interfaces"]
-        DASH["Dashboard\nFastAPI + React"]
-        ALERT["Telegram alert\n(or console notifier)"]
-    end
-    DB --> DASH
-    NH --> ALERT
-
-    subgraph HUM["Human"]
-        H["Investor\nreviews the alert,\napprove first message; money always"]
-    end
-    DASH --> H
-    ALERT --> H
-    H -.approve / reject.-> OBX
-
-    classDef llm fill:#efe4ff,stroke:#7c4dff,color:#3d1a8f;
-    classDef det fill:#e0f2ff,stroke:#2f7ed8,color:#0d3a66;
-    classDef human fill:#fff1d6,stroke:#e08a00,color:#6b4400;
-    classDef store fill:#eeeeee,stroke:#666666,color:#222222;
-    classDef aws fill:#e7f7ec,stroke:#26834a,color:#124b2b;
-
-    class MP,AA,SK,INSP llm;
-    class RC,UW,RSR,DBQ,DIL,OBX,NH det;
-    class H human;
-    class DB store;
-    class AC,BR,AM,SES aws;
-```
+*Amber: agent judgment. Blue: deterministic, tested code. Green: the human. The animated version is [architecture/diagram.html](architecture/diagram.html); open it in a browser.*
 
 **Model discretion vs. deterministic code.** The Strands agents perform tasks that require judgment, such as reading a messy email, a 40-page OM, or a condition report with photos. They identify claims, cite the page or photo for each, and determine which claims are unsupported and material. All subsequent steps are executed by code. The tool order is fixed, every gate evaluates within the tool body, and a safety net runs any step the model skips. The credit amount is determined by frontier arithmetic, and diligence questions are reconciled against the Skeptic's list. If the model called no tools after extraction, the outcome would be identical. The system acts as the agent, with the LLM serving as a perception and judgment component.
 

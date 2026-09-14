@@ -1,119 +1,36 @@
 # DealSieve architecture
 
-Rendered image: [`architecture.png`](architecture.png) (generated from `architecture.mmd` via
-`npx -y @mermaid-js/mermaid-cli -i architecture/architecture.mmd -o architecture/architecture.png -w 1600 -b white`).
+Image: [`architecture.png`](architecture.png), exported from [`diagram.html`](diagram.html).
+Open the HTML in a browser to watch one deal move through the system; add `?static=1` for the still.
+Export again with Playwright: `python architecture/render_diagram.py --static architecture/architecture.png` (needs Playwright with Chromium).
 
-Four boundaries are color-coded in the diagram:
+The diagram reads left to right in three lanes plus a strip underneath. The colours are the
+boundaries that matter:
 
-- **LLM territory (purple)** — the Strands Acquisition Agent and the independent Skeptic Agent. This
-  is where ambiguity lives: reading a messy email or OM and turning it into structured claims, or
-  arguing the other side of a deal that already passed every gate. The model provider underneath
-  either agent is swappable by environment variable with no code change.
-- **Deterministic code (blue)** — the five tools the Acquisition Agent calls. Every dollar of
-  arithmetic, every gate comparison, and every guard on *when* a tool is even allowed to act
-  (`notify_human` only fires on a real threshold crossing; `request_diligence` only after a
-  skeptic report exists) lives here, in tested Python. The model cannot bypass a gate — it can only
-  call the tool and read back what the tool decided.
-- **Human (orange)** — the only actor who can approve a draft, reject it, or send anything to a
-  broker. Nothing crosses this line automatically.
-- **AWS services (green)** — the deployed Amazon Bedrock AgentCore Runtime plus the implemented
-  Bedrock model, AgentCore Memory and Amazon SES integration points. Dashed lines identify optional
-  adapters rather than claiming they are required for local execution.
+- **Amber, reads and judges (Strands agents).** The Acquisition Agent turns a broker email, an
+  offering memo or a rent roll into claims, each cited to a page or a photo. The Skeptic Agent argues
+  what those claims do not support. The Inspector Agent reads a condition report and its photographs
+  and names the capex it finds. All three are Strands `Agent`s over a swappable model provider
+  (`CLIModel` for Claude, Gemini or Codex on the command line, `BedrockModel` in AWS, `ScriptedModel`
+  for the offline demo). They have tools and judgment. They never do arithmetic that reaches a
+  decision, and they cannot send anything.
+- **Blue, rules (plain Python, `Decimal`, tested).** Normalize the claims, apply the frozen policy
+  (its version is the content hash of the YAML), solve for the price at which every gate would pass,
+  classify DEAD, WATCH, NEAR or REVIEW. The Inspector's capex figure is checked against the document
+  text before it enters the basis. Every outbound draft passes the same screen: about money, always
+  a human; first message in a thread, a human approves; a follow-up on an approved thread, automatic.
+  The model can only call these tools and read back what they decided.
+- **Green, the human.** The alert carries the actual email. One tap approves it. Nothing about money
+  moves without that tap, and nothing reaches a broker without it. Follow-ups go out at day 3 and
+  day 6, then the system stops and tells the human once.
+- **Ledger and memory.** Events, underwriting runs, evidence and policy versions are append-only in
+  SQLite (the `Opportunity` row is the only mutable, derived projection). The investor's past
+  decisions live in Amazon Bedrock AgentCore Memory with a local store as the fallback; the alert
+  quotes them back ("You previously: passed at $1.29M").
 
-SQLite sits underneath as the immutable record (events and underwriting runs are append-only; the
-`Opportunity` row is the only mutable, derived projection of that history). The dashboard and the
-Telegram alert are both read/notify surfaces over that same store — neither one is a second source of
-truth.
+Replies, price cuts and reports return through the inbox and re-run the whole path, which is the
+WATCH -> REVIEW spine that `tests/e2e/test_watch_to_review.py` specifies.
 
-```mermaid
-flowchart TD
-    subgraph CH["Channels"]
-        EM["Email\n(.eml / SES)"]
-        TG["Telegram"]
-        URLIN["URL paste"]
-    end
-
-    IM["InboundMessage\nchannel-agnostic"]
-    EM --> IM
-    TG --> IM
-    URLIN --> IM
-
-    subgraph AWS["AWS services"]
-        AC["Amazon Bedrock AgentCore Runtime\nDEPLOYED · us-west-2\nhosts the same process_inbound pipeline"]
-        BR["Amazon Bedrock\nStrands BedrockModel backend\nimplemented · account quota pending"]
-        AM["Amazon Bedrock AgentCore Memory\noptional memory adapter"]
-        SES["Amazon SES\noptional email transport"]
-    end
-
-    AC -->|"email / text invocation"| IM
-    SES -."inbound email".-> EM
-
-    subgraph LLM["LLM territory — Strands Agents SDK"]
-        MP["Model provider\nCLIModel · BedrockModel · AnthropicModel · ScriptedModel\n(swapped by env var, zero code change)"]
-        AA["Acquisition Agent\nextracts claims with provenance,\nfollows a fixed tool-call procedure"]
-        SK["Skeptic Agent\nindependent second opinion,\nstructured_output_model=SkepticOutput"]
-        INSP["Inspector Agent\nmultimodal: text + photos"]
-        AA -.uses.- MP
-        SK -.uses.- MP
-        INSP -.uses.- MP
-    end
-
-    IM --> AA
-    MP -."configured provider".-> BR
-
-    subgraph DET["Deterministic code — Python, tested, enforces every gate"]
-        RC["record_claims\nidentity resolve + evidence store + reconcile"]
-        UW["underwrite\ndeterministic finance engine\n+ immutable policy + viability solver"]
-        RSR["request_skeptic_review\n(only when status = REVIEW)"]
-        DBQ["request_diligence\n(only after a skeptic report)"]
-        DIL["Diligence Loop\nrequest_diligence -> DiligenceRequest\nfollow-up scheduler · match answers\nimmediate capex -> re-underwrite"]
-        OBX["Outbox\nfile / SMTP / SES\npolicy screen"]
-        NH["notify_human\n(threshold crossing, or diligence stalled)"]
-    end
-
-    AA -->|"tool call"| RC --> UW --> RSR
-    AA -.->|"analyze_document"| INSP
-    INSP -->|"resolves"| DIL
-    RSR -->|invokes| SK
-    SK -->|verdict + concerns| DBQ --> DIL
-    DIL --> OBX
-    DIL --> NH
-    DBQ --> NH
-
-    DB[("SQLite\nimmutable events · immutable underwriting runs\nderived opportunity state")]
-    RC --> DB
-    UW --> DB
-    RSR --> DB
-    DBQ --> DB
-    DIL --> DB
-    OBX --> DB
-    NH --> DB
-    DB -."optional memory sync".-> AM
-    OBX -."optional delivery".-> SES
-
-    subgraph OUT["Interfaces"]
-        DASH["Dashboard\nFastAPI + React"]
-        ALERT["Telegram alert\n(or console notifier)"]
-    end
-    DB --> DASH
-    NH --> ALERT
-
-    subgraph HUM["Human"]
-        H["Investor\nreviews the alert,\napprove first message; money always"]
-    end
-    DASH --> H
-    ALERT --> H
-    H -.approve / reject.-> OBX
-
-    classDef llm fill:#efe4ff,stroke:#7c4dff,color:#3d1a8f;
-    classDef det fill:#e0f2ff,stroke:#2f7ed8,color:#0d3a66;
-    classDef human fill:#fff1d6,stroke:#e08a00,color:#6b4400;
-    classDef store fill:#eeeeee,stroke:#666666,color:#222222;
-    classDef aws fill:#e7f7ec,stroke:#26834a,color:#124b2b;
-
-    class MP,AA,SK,INSP llm;
-    class RC,UW,RSR,DBQ,DIL,OBX,NH det;
-    class H human;
-    class DB store;
-    class AC,BR,AM,SES aws;
-```
+Platform: Strands Agents SDK; Amazon Bedrock AgentCore Runtime hosts the same `process_inbound`
+pipeline (deployed, us-west-2); Amazon Bedrock is the model backend in AWS; AgentCore Memory and
+Amazon SES are adapters behind interfaces, so everything also runs offline.

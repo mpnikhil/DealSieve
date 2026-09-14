@@ -10,7 +10,7 @@ Last updated: 2026-09-13 22:00 PDT. Submission deadline: 2026-09-14 17:00 PDT.
 - Live model runs: acts 1-2 through Claude Sonnet, Gemini Flash and Codex; act 3 with photos through Codex.
 
 ## Working Now
-- Final review of the demo video (2:40 cut, product-first script, phone recordings of two alerts) and the Devpost submission.
+- Final review of the demo video (about 3:25 cut: product-first script, animated architecture segment rendered from architecture/diagram.html, phone recordings of two alerts, the discipline line in the close) and the Devpost submission.
 
 
 ## Blockers
@@ -20,7 +20,7 @@ Last updated: 2026-09-13 22:00 PDT. Submission deadline: 2026-09-14 17:00 PDT.
 ## Next Three Tasks
 1. Finish and review the demo video; submit on Devpost with docs/SUBMISSION.md.
 2. When the Bedrock quota lifts, run the two-email story against the deployed runtime and log it in deploys/LEDGER.tsv.
-3. If a Telegram token arrives, approve the information request from the phone and capture it for the video.
+3. Optional: film the stall alert on the phone (the cut uses a rendered card for it).
 
 ## Demo Health
 Offline three-act story (+ follow-ups, memory): PASS

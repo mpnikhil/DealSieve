@@ -1,0 +1,475 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>DealSieve — how it's built</title>
+<style>
+  /* Same visual language as the film and the dashboard: slate paper, system sans,
+     tabular mono for figures, one orange accent. Three lanes = three boundaries. */
+  :root {
+    --paper: #f8fafc; --ink: #0f172a; --ink2: #334155; --dim: #64748b; --line: #e2e8f0;
+    --amber: #b45309; --amber-t: #fff7ed; --amber-l: #fdba74;
+    --blue: #1d4ed8;  --blue-t: #eff6ff;  --blue-l: #93c5fd;
+    --green: #15803d; --green-t: #f0fdf4; --green-l: #86efac;
+    --accent: #ea580c;
+    --sans: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Helvetica Neue", Arial, sans-serif;
+    --mono: "SF Mono", Menlo, "JetBrains Mono", ui-monospace, monospace;
+  }
+  html, body { margin: 0; padding: 0; background: var(--paper); }
+  body { width: 1920px; height: 1080px; overflow: hidden; font-family: var(--sans);
+         -webkit-font-smoothing: antialiased; }
+  svg { display: block; width: 1920px; height: 1080px; }
+  text { font-family: var(--sans); fill: var(--ink); }
+  .mono { font-family: var(--mono); }
+  .node-shadow { filter: drop-shadow(0 1px 2px rgba(15,23,42,.06)) drop-shadow(0 8px 24px rgba(15,23,42,.06)); }
+</style>
+</head>
+<body>
+<svg id="stage" viewBox="0 0 1920 1080" xmlns="http://www.w3.org/2000/svg"></svg>
+<script>
+(() => {
+"use strict";
+const NS = "http://www.w3.org/2000/svg";
+const svg = document.getElementById("stage");
+const C = {
+  amber: "#b45309", amberT: "#fff7ed", blue: "#1d4ed8", blueT: "#eff6ff",
+  green: "#15803d", greenT: "#f0fdf4", ink: "#0f172a", ink2: "#334155", dim: "#64748b",
+  line: "#e2e8f0", accent: "#ea580c", paper: "#f8fafc", slate: "#475569",
+};
+const el = (tag, attrs = {}, parent = svg) => {
+  const n = document.createElementNS(NS, tag);
+  for (const [k, v] of Object.entries(attrs)) n.setAttribute(k, v);
+  parent.appendChild(n);
+  return n;
+};
+const txt = (x, y, s, attrs = {}, parent = svg) => {
+  const t = el("text", { x, y, ...attrs }, parent);
+  t.textContent = s;
+  return t;
+};
+const lerp = (a, b, u) => a + (b - a) * u;
+const clamp01 = (v) => Math.max(0, Math.min(1, v));
+const ease = (u) => { u = clamp01(u); return u < 0.5 ? 2 * u * u : 1 - Math.pow(-2 * u + 2, 2) / 2; };
+// progress of a window [a,b] at time f (fractions of the whole)
+const win = (f, a, b) => clamp01((f - a) / Math.max(1e-6, b - a));
+
+// ------------------------------------------------------------------ static scaffolding
+const gLanes = el("g"), gEdges = el("g"), gNodes = el("g"), gDeco = el("g"), gAnim = el("g");
+
+const LANES = [
+  { id: "A", y: 118, h: 286, col: C.amber, tint: C.amberT, label: "READS AND JUDGES  ·  STRANDS AGENTS" },
+  { id: "B", y: 416, h: 312, col: C.blue,  tint: C.blueT,  label: "RULES  ·  EXACT, TESTED, PLAIN PYTHON" },
+  { id: "C", y: 740, h: 160, col: C.green, tint: C.greenT, label: "HUMAN DECIDES" },
+];
+const laneEls = {};
+for (const L of LANES) {
+  const g = el("g", {}, gLanes);
+  el("rect", { x: 96, y: L.y, width: 1728, height: L.h, rx: 18, fill: L.tint }, g);
+  el("rect", { x: 96, y: L.y, width: 6, height: L.h, rx: 3, fill: L.col, opacity: 0.9 }, g);
+  txt(148, L.y + 36, L.label, { "font-size": 21, "font-weight": 700, fill: L.col, "letter-spacing": 3 }, g);
+  laneEls[L.id] = g;
+}
+// lane A footnote and the ledger header
+const foot = txt(1772, 154, "Claude on Amazon Bedrock  ·  tools only  ·  no arithmetic  ·  cannot send",
+  { "font-size": 20, fill: C.dim, "text-anchor": "end" }, gLanes);
+const ledgerHdr = el("g", {}, gLanes);
+el("rect", { x: 96, y: 916, width: 1728, height: 1, fill: C.line }, ledgerHdr);
+txt(148, 963, "LEDGER AND MEMORY", { "font-size": 20, "font-weight": 700, fill: C.slate, "letter-spacing": 3 }, ledgerHdr);
+
+// wordmark + legend (frame 0)
+txt(132, 80, "DealSieve", { "font-size": 25, "font-weight": 600, fill: C.ink, "letter-spacing": -0.3 }, gDeco);
+txt(262, 80, "How it's built", { "font-size": 25, fill: C.dim }, gDeco);
+const legend = el("g", {}, gDeco);
+[[C.amber, "agent judgment"], [C.blue, "deterministic, tested"], [C.green, "human decision"]]
+  .reduce((x, [col, label]) => {
+    const w = label.length * 9.6 + 34;
+    el("circle", { cx: x - w + 8, cy: 73, r: 6, fill: col }, legend);
+    txt(x - w + 24, 80, label, { "font-size": 20, fill: C.ink2 }, legend);
+    return x - w - 26;
+  }, 1772);
+
+// ------------------------------------------------------------------ icons (2px strokes)
+const ICON = {
+  mail: "M2 5h20v14H2z M2 5l10 8 10-8",
+  camera: "M3 8h4l2-3h6l2 3h4v12H3z M12 17a3.5 3.5 0 1 0 0-7 3.5 3.5 0 0 0 0 7z",
+  phone: "M7 2h10a2 2 0 0 1 2 2v16a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2z M10 19h4",
+  agent: "M12 12a4 4 0 1 0 0-8 4 4 0 0 0 0 8z M4 21c0-4 3.6-7 8-7s8 3 8 7",
+  eye: "M2 12s4-7 10-7 10 7 10 7-4 7-10 7S2 12 2 12z M12 15a3 3 0 1 0 0-6 3 3 0 0 0 0 6z",
+  doc: "M6 2h9l5 5v15H6z M15 2v5h5 M9 13h8 M9 17h8",
+  calc: "M5 2h14v20H5z M8 6h8 M8 11h2 M12 11h2 M16 11h2 M8 15h2 M12 15h2 M16 15h2 M8 19h2 M12 19h6",
+  gate: "M12 2l8 4v6c0 5-3.5 8.5-8 10-4.5-1.5-8-5-8-10V6z M9 12l2 2 4-4",
+  target: "M12 21a9 9 0 1 0 0-18 9 9 0 0 0 0 18z M12 16a4 4 0 1 0 0-8 4 4 0 0 0 0 8z M12 12h.01",
+  db: "M12 3c5 0 9 1.3 9 3s-4 3-9 3-9-1.3-9-3 4-3 9-3z M3 6v12c0 1.7 4 3 9 3s9-1.3 9-3V6 M3 12c0 1.7 4 3 9 3s9-1.3 9-3",
+  memory: "M4 4h16v16H4z M9 9h6v6H9z M9 2v2 M15 2v2 M9 20v2 M15 20v2 M2 9h2 M2 15h2 M20 9h2 M20 15h2",
+  send: "M22 2L11 13 M22 2l-7 20-4-9-9-4z",
+  person: "M12 12a4 4 0 1 0 0-8 4 4 0 0 0 0 8z M4 21c0-4 3.6-7 8-7s8 3 8 7",
+  bolt: "M13 2L4 14h7l-1 8 9-12h-7z",
+};
+
+// ------------------------------------------------------------------ nodes
+const NODES = {
+  src1: { x: 148, y: 176, w: 300, h: 88,  lane: "A", icon: "mail",   title: "Broker email", sub: ["OM · rent roll · price cut"], small: true },
+  src2: { x: 148, y: 274, w: 300, h: 64,  lane: "A", icon: "camera", title: "Inspection report", sub: ["PDF with photos"], small: true },
+  src3: { x: 148, y: 348, w: 300, h: 50,  lane: "A", icon: "phone",  title: "Telegram / dashboard", sub: [], small: true },
+  acq:  { x: 520, y: 190, w: 320, h: 104, lane: "A", icon: "agent",  title: "Acquisition agent", sub: ["extracts claims, cites", "the page or the photo"] },
+  ins:  { x: 900, y: 190, w: 320, h: 104, lane: "A", icon: "eye",    title: "Inspector agent",   sub: ["reads the report", "and its photos"] },
+  skp:  { x: 1260, y: 190, w: 320, h: 104, lane: "A", icon: "person", title: "Skeptic agent",    sub: ["argues what", "isn't supported"] },
+  nrm:  { x: 540, y: 478, w: 200, h: 100,  lane: "B", icon: "calc",   title: "Normalize", sub: ["exact Decimal", "capex verified"] },
+  gate: { x: 780, y: 478, w: 260, h: 100,  lane: "B", icon: "gate",   title: "Policy gates", sub: ["frozen · version =", "content hash"] },
+  slv:  { x: 1080, y: 478, w: 240, h: 100, lane: "B", icon: "target", title: "Viability solver", sub: ["the price where", "it clears"] },
+  phone:{ x: 1480, y: 790, w: 260, h: 96, lane: "C", icon: "phone",  title: "Phone alert", sub: ["the actual email", "one tap approves"] },
+  obx:  { x: 1200, y: 790, w: 220, h: 96, lane: "C", icon: "send",   title: "Outbox", sub: ["day 3 · day 6", "then stop, tell me"] },
+  brk:  { x: 900, y: 790, w: 220, h: 96,  lane: "C", icon: "person", title: "Broker", sub: ["reply · price cut", "report"] },
+  ledg: { x: 430, y: 924, w: 600, h: 64,  lane: "L", icon: "db",     title: "Append-only ledger", sub: ["events · runs · evidence · policy versions"], strip: true },
+  mem:  { x: 1070, y: 924, w: 600, h: 64, lane: "L", icon: "memory", title: "You previously: passed at $1.29M", sub: ["Amazon Bedrock AgentCore Memory · local fallback"], strip: true, monoTitle: true },
+};
+const laneCol = (id) => id === "A" ? C.amber : id === "B" ? C.blue : id === "C" ? C.green : C.slate;
+const nodeEls = {};
+for (const [id, n] of Object.entries(NODES)) {
+  const g = el("g", { class: "node-shadow" }, gNodes);
+  const col = laneCol(n.lane);
+  const rect = el("rect", { x: n.x, y: n.y, width: n.w, height: n.h, rx: 14, fill: "#fff", stroke: C.line, "stroke-width": 1.5 }, g);
+  const bar = el("rect", { x: n.x, y: n.y + 12, width: 4, height: n.h - 24, rx: 2, fill: col, opacity: 0 }, g);
+  const icoSize = n.small ? 26 : 30;
+  const icoY = n.strip ? n.y + (n.h - icoSize) / 2 : n.small ? n.y + 16 : n.y + 22;
+  const ico = el("path", { d: ICON[n.icon], fill: "none", stroke: C.dim, "stroke-width": 2, "stroke-linecap": "round", "stroke-linejoin": "round",
+    transform: `translate(${n.x + 20},${icoY}) scale(${icoSize / 24})` }, g);
+  const tx = n.x + 20 + icoSize + 16;
+  let title, subs = [];
+  if (n.strip) {
+    title = txt(tx, n.y + 30, n.title, { "font-size": n.monoTitle ? 22 : 24, "font-weight": 600,
+      class: n.monoTitle ? "mono" : "" }, g);
+    subs = [txt(tx, n.y + 54, n.sub[0], { "font-size": 19, fill: C.dim }, g)];
+  } else if (n.small) {
+    title = txt(tx, n.y + (n.sub.length ? 36 : 34), n.title, { "font-size": 24, "font-weight": 600 }, g);
+    if (n.sub.length) subs = [txt(tx, n.y + 62, n.sub[0], { "font-size": 19, fill: C.dim }, g)];
+  } else {
+    title = txt(tx, n.y + 40, n.title, { "font-size": 26, "font-weight": 600 }, g);
+    subs = n.sub.map((s, i) => txt(tx, n.y + 66 + i * 24, s, { "font-size": 20, fill: C.dim }, g));
+  }
+  nodeEls[id] = { g, rect, bar, ico, title, subs, col, n };
+}
+
+// classify + outbound diamonds
+const DIAMONDS = {
+  cls: { cx: 1420, cy: 528, r: 50, lines: ["Classify"], col: C.blue },
+  mny: { cx: 1700, cy: 528, r: 54, lines: ["About", "money?"], col: C.blue },
+  fst: { cx: 1560, cy: 656, r: 54, lines: ["First", "message?"], col: C.blue },
+};
+const diaEls = {};
+for (const [id, d] of Object.entries(DIAMONDS)) {
+  const g = el("g", { class: "node-shadow" }, gNodes);
+  const pts = `${d.cx},${d.cy - d.r} ${d.cx + d.r},${d.cy} ${d.cx},${d.cy + d.r} ${d.cx - d.r},${d.cy}`;
+  const poly = el("polygon", { points: pts, fill: "#fff", stroke: C.line, "stroke-width": 1.5, "stroke-linejoin": "round" }, g);
+  const ts = d.lines.map((s, i) => txt(d.cx, d.cy + (d.lines.length === 1 ? 7 : -3 + i * 22), s,
+    { "font-size": 19, "font-weight": 600, "text-anchor": "middle", fill: C.ink2 }, g));
+  diaEls[id] = { g, poly, ts, d };
+}
+// outcome pills
+const PILLS = [["DEAD", 452], ["WATCH", 496], ["NEAR", 540], ["REVIEW", 584]];
+const pillEls = {};
+for (const [label, y] of PILLS) {
+  const g = el("g", {}, gNodes);
+  const r = el("rect", { x: 1500, y, width: 110, height: 34, rx: 17, fill: "#fff", stroke: C.line, "stroke-width": 1.5 }, g);
+  const t = txt(1555, y + 23, label, { "font-size": 17, "font-weight": 700, "text-anchor": "middle", fill: C.dim, class: "mono", "letter-spacing": 1 }, g);
+  pillEls[label] = { g, r, t, y };
+}
+// small labels on branches
+const LABELS = [
+  [1432, 400, "REVIEW only", "start"], [1600, 232, "drafted questions", "start"],
+  [1712, 628, "no", "start"], [1757, 690, "yes", "start"], [1336, 646, "no · follow-up", "start"],
+  [1526, 758, "yes", "start"],  [726, 432, "verified capex", "start"],
+  [512, 724, "reply · price cut · report → re-run", "start"],
+  [842, 262, "tool", "start"],
+];
+const labelEls = LABELS.map(([x, y, s, anchor]) => txt(x, y, s, { "font-size": 17, fill: C.dim, "text-anchor": anchor, class: "mono" }, gDeco));
+
+// ------------------------------------------------------------------ edges
+// each edge: path d, colour, dashed?, draws in window [a,b] of the timeline, arrow at end
+const EDGES = {
+  bus:   { d: "M448,220 H484 V373 H448", col: C.amber, w: 2, arrow: false, t: [0.05, 0.08] },
+  busAcq:{ d: "M484,242 H520", col: C.amber, w: 2, t: [0.09, 0.115] },
+  acqIns:{ d: "M840,242 H900", col: C.amber, w: 2, t: [0.255, 0.29] },
+  acqNrm:{ d: "M640,294 V478", col: C.blue, w: 2, t: [0.453, 0.48] },
+  insNrm:{ d: "M1060,294 V440 H700 V478", col: C.blue, w: 2, t: [0.46, 0.495] },
+  nrmGate:{ d: "M740,528 H780", col: C.blue, w: 2, t: [0.48, 0.50] },
+  gateSlv:{ d: "M1040,528 H1080", col: C.blue, w: 2, t: [0.50, 0.52] },
+  slvCls:{ d: "M1320,528 H1370", col: C.blue, w: 2, t: [0.52, 0.54] },
+  cDead: { d: "M1470,528 C1486,528 1486,469 1500,469", col: C.line, w: 2, t: [0.545, 0.56], dimEnd: true },
+  cWatch:{ d: "M1470,528 C1486,528 1486,513 1500,513", col: C.line, w: 2, t: [0.55, 0.565], dimEnd: true },
+  cNear: { d: "M1470,528 C1486,528 1486,557 1500,557", col: C.line, w: 2, t: [0.555, 0.57], dimEnd: true },
+  cRev:  { d: "M1470,528 C1486,528 1486,601 1500,601", col: C.green, w: 2.5, t: [0.56, 0.575] },
+  clsSkp:{ d: "M1420,478 V294", col: C.amber, w: 2, t: [0.60, 0.63] },
+  skpMny:{ d: "M1580,242 H1700 V474", col: C.blue, w: 2, t: [0.78, 0.80] },
+  mnyYes:{ d: "M1754,528 H1774 V838 H1740", col: C.green, w: 2.5, t: [0.891, 0.91] },
+  mnyNo: { d: "M1700,582 V656 H1614", col: C.blue, w: 2, t: [0.80, 0.813] },
+  fstYes:{ d: "M1560,710 V790", col: C.green, w: 2.5, t: [0.813, 0.826] },
+  fstNo: { d: "M1506,656 H1310 V790", col: C.blue, w: 2, t: [0.968, 0.979] },
+  phObx: { d: "M1480,838 H1420", col: C.green, w: 2.5, t: [0.857, 0.868] },
+  obxBrk:{ d: "M1200,838 H1120", col: C.green, w: 2.5, t: [0.868, 0.879] },
+  ret:   { d: "M900,838 H860 V734 H492 V372 H486", col: C.slate, w: 2, dashed: true, t: [0.965, 0.995] },
+  ledg:  { d: "M880,578 V924", col: C.slate, w: 2, dashed: true, t: [0.672, 0.70] },
+  memPh: { d: "M1560,924 V886", col: C.slate, w: 2, dashed: true, t: [0.734, 0.766] },
+};
+const edgeEls = {};
+for (const [id, e] of Object.entries(EDGES)) {
+  const g = el("g", {}, gEdges);
+  const ghost = el("path", { d: e.d, fill: "none", stroke: C.line, "stroke-width": e.w, "stroke-dasharray": e.dashed ? "6 6" : "none", opacity: 0.9 }, g);
+  const live = el("path", { d: e.d, fill: "none", stroke: e.col, "stroke-width": e.w, "stroke-linecap": "round", "stroke-linejoin": "round" }, g);
+  const len = live.getTotalLength();
+  live.setAttribute("stroke-dasharray", e.dashed ? `6 6` : `${len}`);
+  // arrowhead as its own polygon so it appears only when the line reaches the end
+  let head = null;
+  if (e.arrow !== false) {
+    const p1 = live.getPointAtLength(Math.max(0, len - 1)), p2 = live.getPointAtLength(len);
+    const ang = Math.atan2(p2.y - p1.y, p2.x - p1.x) * 180 / Math.PI;
+    head = el("polygon", { points: "0,0 -12,-6 -12,6", fill: e.col, transform: `translate(${p2.x},${p2.y}) rotate(${ang})` }, g);
+    const ghostHead = el("polygon", { points: "0,0 -12,-6 -12,6", fill: C.line, transform: `translate(${p2.x},${p2.y}) rotate(${ang})` }, g);
+    g.insertBefore(ghostHead, live);
+  }
+  edgeEls[id] = { g, ghost, live, head, len, e };
+}
+// motion paths (hidden) for the packets
+const motion = (d) => { const p = el("path", { d, fill: "none", stroke: "none" }, gAnim); return { p, len: p.getTotalLength() }; };
+const M = {
+  toAcq: motion("M300,220 H484 V242 H520"),
+  acqToIns: motion("M840,242 H900"),
+  acqToNrm: motion("M640,294 V478"),
+  insToNrm: motion("M1060,294 V440 H700 V478"),
+  nrmToGate: motion("M740,528 H780"), gateToSlv: motion("M1040,528 H1080"), slvToCls: motion("M1320,528 H1370"),
+  clsToRev: motion("M1470,528 C1486,528 1486,601 1500,601"),
+  clsToSkp: motion("M1420,478 V294"),
+  skpToMny: motion("M1580,242 H1700 V474"),
+  mnyNo: motion("M1700,582 V656 H1614"), fstYes: motion("M1560,710 V790"),
+  mnyYes: motion("M1754,528 H1774 V838 H1740"),
+  fstNo: motion("M1506,656 H1310 V790"),
+  phToObx: motion("M1480,838 H1420"), obxToBrk: motion("M1200,838 H1120"),
+  ledger: motion("M880,578 V924"),
+  ret: motion("M900,838 H860 V734 H492 V372 H486"),
+};
+
+// packets: a pill with a glyph, drawn on top of everything
+const mkPacket = (col, label, mono) => {
+  const g = el("g", { opacity: 0 }, gAnim);
+  const w = label.length * (mono ? 11 : 10) + 28;
+  const trail = el("circle", { cx: 0, cy: 0, r: 16, fill: col, opacity: 0.16 }, g);
+  const trail2 = el("circle", { cx: 0, cy: 0, r: 26, fill: col, opacity: 0.08 }, g);
+  el("rect", { x: -w / 2, y: -16, width: w, height: 32, rx: 16, fill: col }, g);
+  txt(0, 6, label, { "font-size": 17, "font-weight": 700, fill: "#fff", "text-anchor": "middle", class: mono ? "mono" : "", "letter-spacing": 0.3 }, g);
+  return { g, trail, trail2 };
+};
+const PK = {
+  email: mkPacket(C.accent, "email", false),
+  claims: mkPacket(C.blue, "claims", true),
+  capex: mkPacket(C.blue, "capex $90k", true),
+  draft: mkPacket(C.accent, "draft", false),
+  credit: mkPacket(C.accent, "credit $42k", true),
+  follow: mkPacket(C.accent, "day 3", true),
+  reply: mkPacket(C.slate, "reply", false),
+  write: mkPacket(C.slate, "run #42", true),
+};
+// chips (callouts that pop next to a node)
+const mkChip = (x, y, s, col) => {
+  const g = el("g", { opacity: 0 }, gAnim);
+  const w = s.length * 10.2 + 28;
+  el("rect", { x, y, width: w, height: 36, rx: 8, fill: "#fff", stroke: col, "stroke-width": 1.5 }, g);
+  el("rect", { x, y, width: 5, height: 36, rx: 2.5, fill: col }, g);
+  txt(x + 16, y + 24, s, { "font-size": 18, fill: C.ink2, class: "mono" }, g);
+  return g;
+};
+const CH = {
+  acq: mkChip(536, 306, "cap rate 8.0% · p.3 · asking $1.55M", C.amber),
+  ins: mkChip(916, 306, "roof · 25 yrs · ponding · photo 2", C.amber),
+  slv: mkChip(1086, 596, "clears at $1.29M", C.blue),
+  skp: mkChip(1276, 306, "unsupported: roof age · Phase I · CAM", C.amber),
+  tap: mkChip(1596, 742, "Approve and send  ✓", C.green),
+  tap2: mkChip(1596, 742, "Approve and send  ✓", C.green),
+  mem: mkChip(1086, 884, "read back into the alert", C.slate),
+};
+// tap ripple on the phone
+const ripple = el("circle", { cx: 1610, cy: 838, r: 0, fill: "none", stroke: C.green, "stroke-width": 3, opacity: 0 }, gAnim);
+const ripple2 = el("circle", { cx: 1610, cy: 838, r: 0, fill: "none", stroke: C.green, "stroke-width": 3, opacity: 0 }, gAnim);
+// ledger counter
+const counter = txt(1010, 947, "events 41", { "font-size": 19, fill: C.dim, "text-anchor": "end", class: "mono" }, gAnim);
+
+// platform footer
+const PLATFORM = ["Strands Agents SDK", "Amazon Bedrock AgentCore Runtime", "AgentCore Memory", "Amazon Bedrock", "SQLite", "Telegram"];
+const platEls = [];
+{
+  let x = 148;
+  PLATFORM.forEach((s, i) => {
+    const t = txt(x, 1044, s, { "font-size": 20, fill: C.dim, class: "mono" }, gDeco);
+    platEls.push(t);
+    x += s.length * 12.05 + 12;
+    if (i < PLATFORM.length - 1) { txt(x, 1044, "·", { "font-size": 20, fill: C.line }, gDeco); x += 26; }
+  });
+}
+
+// ------------------------------------------------------------------ timeline
+let DURATION = 40000;
+const CUES = { intro: 0, agents: 0.08, boundary: 0.36, engine: 0.453, skeptic: 0.60, ledger: 0.672, human: 0.78, platform: 0.89 };
+window.setDuration = (ms) => { DURATION = ms; };
+window.cues = () => Object.fromEntries(Object.entries(CUES).map(([k, v]) => [k, Math.round(v * DURATION)]));
+
+const LIT = {  // node id -> time it lights
+  src1: 0.07, src2: 0.07, src3: 0.07, acq: 0.117, ins: 0.29, nrm: 0.48, gate: 0.50, slv: 0.52,
+  skp: 0.63, phone: 0.826, obx: 0.868, brk: 0.879, ledg: 0.70, mem: 0.72,
+};
+const NODE_ORDER = ["src1", "src2", "src3", "acq", "ins", "skp", "nrm", "gate", "slv", "phone", "obx", "brk", "ledg", "mem"];
+
+function setNodeLit(ne, lit, hot) {
+  // lit: 0..1 (stays), hot: 0..1 (brief pulse when the packet arrives)
+  const stroke = lit > 0.5 ? ne.col : C.line;
+  ne.rect.setAttribute("stroke", stroke);
+  ne.rect.setAttribute("stroke-width", lit > 0.5 ? 2.2 : 1.5);
+  ne.bar.setAttribute("opacity", lit);
+  ne.title.setAttribute("fill", lit > 0.5 ? ne.col : C.ink);
+  ne.ico.setAttribute("stroke", lit > 0.5 ? ne.col : C.dim);
+  ne.g.setAttribute("transform", `translate(0,${-3 * hot})`);
+}
+function setDia(de, lit, hot) {
+  de.poly.setAttribute("stroke", lit > 0.5 ? de.d.col : C.line);
+  de.poly.setAttribute("stroke-width", lit > 0.5 ? 2.2 : 1.5);
+  de.poly.setAttribute("fill", hot > 0 ? `rgba(29,78,216,${0.10 * hot})` : "#fff");
+  de.ts.forEach((t) => t.setAttribute("fill", lit > 0.5 ? de.d.col : C.ink2));
+  const s = 1 + 0.06 * hot;
+  de.g.setAttribute("transform", `translate(${de.d.cx},${de.d.cy}) scale(${s}) translate(${-de.d.cx},${-de.d.cy})`);
+}
+function placePacket(pk, m, u, visible) {
+  if (!visible) { pk.g.setAttribute("opacity", 0); return; }
+  const pt = m.p.getPointAtLength(clamp01(u) * m.len);
+  pk.g.setAttribute("opacity", 1);
+  pk.g.setAttribute("transform", `translate(${pt.x},${pt.y})`);
+  // trail: offset back along the path
+  const back = m.p.getPointAtLength(Math.max(0, clamp01(u) * m.len - 22));
+  pk.trail.setAttribute("cx", back.x - pt.x); pk.trail.setAttribute("cy", back.y - pt.y);
+  const back2 = m.p.getPointAtLength(Math.max(0, clamp01(u) * m.len - 44));
+  pk.trail2.setAttribute("cx", back2.x - pt.x); pk.trail2.setAttribute("cy", back2.y - pt.y);
+}
+// a packet travels segments in sequence: [[motion, a, b], ...]; visible between first a and last b
+function travel(pk, segs, f) {
+  const a0 = segs[0][1], b1 = segs[segs.length - 1][2];
+  if (f < a0 || f > b1) { placePacket(pk, null, 0, false); return; }
+  for (const [m, a, b] of segs) {
+    if (f <= b) { placePacket(pk, m, ease(win(f, a, b)), true); return; }
+  }
+}
+function chip(g, f, a, b) {
+  const inU = win(f, a, a + 0.012), outU = 1 - win(f, b - 0.012, b);
+  const o = Math.min(inU, outU);
+  g.setAttribute("opacity", o);
+  g.setAttribute("transform", `translate(0,${(1 - ease(inU)) * 8})`);
+}
+
+function render(f) {
+  f = clamp01(f);
+  const STATIC = f >= 1;
+  // lanes + scaffolding fade in
+  LANES.forEach((L, i) => laneEls[L.id].setAttribute("opacity", ease(win(f, 0.0 + i * 0.01, 0.035 + i * 0.01))));
+  ledgerHdr.setAttribute("opacity", ease(win(f, 0.03, 0.06)));
+  foot.setAttribute("opacity", ease(win(f, 0.03, 0.06)));
+  legend.setAttribute("opacity", ease(win(f, 0.0, 0.03)));
+  labelEls.forEach((t) => t.setAttribute("opacity", ease(win(f, 0.05, 0.08))));
+  platEls.forEach((t, i) => {
+    const lit = win(f, 0.89 + i * 0.017, 0.902 + i * 0.017);
+    t.setAttribute("fill", lit > 0.5 ? C.ink : C.dim);
+    t.setAttribute("font-weight", lit > 0.5 ? 600 : 400);
+    t.setAttribute("opacity", ease(win(f, 0.04, 0.07)));
+  });
+  // nodes appear in reading order, then light when reached
+  NODE_ORDER.forEach((id, i) => {
+    const ne = nodeEls[id];
+    const appear = ease(win(f, 0.02 + i * 0.004, 0.05 + i * 0.004));
+    ne.g.setAttribute("opacity", appear);
+    const t0 = LIT[id];
+    const lit = f >= t0 ? 1 : 0;
+    const hot = f >= t0 ? 1 - win(f, t0, t0 + 0.03) : 0;
+    setNodeLit(ne, lit, hot);
+  });
+  Object.entries(diaEls).forEach(([id, de], i) => {
+    de.g.setAttribute("opacity", ease(win(f, 0.05 + i * 0.004, 0.08 + i * 0.004)));
+    const t0 = id === "cls" ? 0.54 : id === "mny" ? 0.80 : 0.813;
+    const hot = f >= t0 ? 1 - win(f, t0, t0 + 0.035) : 0;
+    setDia(de, f >= t0 ? 1 : 0, hot);
+  });
+  Object.entries(pillEls).forEach(([label, pe], i) => {
+    pe.g.setAttribute("opacity", ease(win(f, 0.06 + i * 0.003, 0.085 + i * 0.003)));
+    const reached = f >= 0.575;
+    const isRev = label === "REVIEW";
+    pe.r.setAttribute("stroke", reached && isRev ? C.green : C.line);
+    pe.r.setAttribute("fill", reached && isRev ? C.greenT : "#fff");
+    pe.t.setAttribute("fill", reached && isRev ? C.green : reached ? "#b6c0cc" : C.dim);
+  });
+  // edges: ghost always (after appear), live draws on in its window
+  Object.values(edgeEls).forEach((ee) => {
+    ee.g.setAttribute("opacity", ease(win(f, 0.05, 0.08)));
+    const u = win(f, ee.e.t[0], ee.e.t[1]);
+    if (ee.e.dashed) {
+      ee.live.setAttribute("opacity", u);
+    } else {
+      ee.live.setAttribute("stroke-dashoffset", ee.len * (1 - u));
+    }
+    if (ee.head) ee.head.setAttribute("opacity", u >= 0.98 ? 1 : 0);
+    if (ee.e.dimEnd) ee.live.setAttribute("stroke", u >= 1 ? "#cbd5e1" : C.line);
+  });
+  // packets
+  travel(PK.email, [[M.toAcq, 0.08, 0.117], [M.acqToIns, 0.255, 0.29]], f);
+  if (f > 0.117 && f < 0.255) placePacket(PK.email, M.toAcq, 1, true);      // sits on the agent
+  travel(PK.claims, [[M.acqToNrm, 0.453, 0.48], [M.nrmToGate, 0.48, 0.50], [M.gateToSlv, 0.50, 0.52], [M.slvToCls, 0.52, 0.54], [M.clsToRev, 0.56, 0.575]], f);
+  if (f > 0.54 && f < 0.56) placePacket(PK.claims, M.slvToCls, 1, true);
+  travel(PK.capex, [[M.insToNrm, 0.46, 0.495]], f);
+  travel(PK.write, [[M.ledger, 0.672, 0.70]], f);
+  travel(PK.draft, [[M.clsToSkp, 0.60, 0.63], [M.skpToMny, 0.78, 0.80], [M.mnyNo, 0.80, 0.813], [M.fstYes, 0.813, 0.826], [M.phToObx, 0.857, 0.868], [M.obxToBrk, 0.868, 0.879]], f);
+  if (f > 0.63 && f < 0.78) placePacket(PK.draft, M.clsToSkp, 1, true);
+  if (f > 0.826 && f < 0.857) placePacket(PK.draft, M.fstYes, 1, true);
+  travel(PK.credit, [[M.skpToMny, 0.879, 0.891], [M.mnyYes, 0.891, 0.91], [M.phToObx, 0.936, 0.945], [M.obxToBrk, 0.945, 0.953]], f);
+  if (f > 0.91 && f < 0.936) placePacket(PK.credit, M.mnyYes, 1, true);
+  travel(PK.follow, [[M.skpToMny, 0.949, 0.96], [M.mnyNo, 0.96, 0.968], [M.fstNo, 0.968, 0.979], [M.obxToBrk, 0.979, 0.987]], f);
+  travel(PK.reply, [[M.ret, 0.965, 0.995]], f);
+  // chips
+  chip(CH.acq, f, 0.14, 0.255); chip(CH.ins, f, 0.295, 0.40); chip(CH.slv, f, 0.525, 0.64);
+  chip(CH.skp, f, 0.632, 0.745); chip(CH.tap, f, 0.834, 0.872); chip(CH.tap2, f, 0.915, 0.936);
+  chip(CH.mem, f, 0.736, 0.81);
+  // the boundary line gets its beat while the narration says "they never do arithmetic"
+  const bnd = win(f, 0.36, 0.375) * (1 - win(f, 0.44, 0.455));
+  foot.setAttribute("fill", bnd > 0.5 ? C.amber : C.dim);
+  foot.setAttribute("font-weight", bnd > 0.5 ? 600 : 400);
+  // ripples
+  for (const [rp, a, b] of [[ripple, 0.83, 0.85], [ripple2, 0.913, 0.928]]) {
+    const u = win(f, a, b);
+    const on = u > 0 && u < 1;
+    rp.setAttribute("opacity", on ? (1 - u) * 0.9 : 0);
+    rp.setAttribute("r", on ? 8 + 44 * ease(u) : 0);
+  }
+  counter.textContent = f >= 0.70 ? "events 42" : "events 41";
+  counter.setAttribute("fill", f >= 0.70 && f < 0.76 ? C.ink : C.dim);
+  counter.setAttribute("opacity", ease(win(f, 0.05, 0.08)));
+  if (STATIC) {
+    Object.values(PK).forEach((pk) => pk.g.setAttribute("opacity", 0));
+    Object.values(CH).forEach((g) => g.setAttribute("opacity", 0));
+  }
+}
+
+// ------------------------------------------------------------------ public API
+let playing = false, rafId = 0, t0 = 0;
+window.seek = (ms) => { playing = false; if (rafId) cancelAnimationFrame(rafId); render(ms / DURATION); };
+window.pause = () => { playing = false; if (rafId) cancelAnimationFrame(rafId); };
+window.play = () => {
+  playing = true; t0 = performance.now();
+  const tick = (now) => {
+    if (!playing) return;
+    const ms = (now - t0) % (DURATION + 2000);       // hold on the end state for 2 s
+    render(Math.min(1, ms / DURATION));
+    rafId = requestAnimationFrame(tick);
+  };
+  rafId = requestAnimationFrame(tick);
+};
+window.renderStatic = () => { window.pause(); render(1); };
+const params = new URLSearchParams(location.search);
+if (params.get("static") === "1") window.renderStatic();
+else if (params.get("autoplay") !== "0") window.play();
+else render(0);
+})();
+</script>
+</body>
+</html>
