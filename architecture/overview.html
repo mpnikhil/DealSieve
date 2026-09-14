@@ -66,8 +66,8 @@ const gBack = el("g"), gEdges = el("g"), gBlocks = el("g"), gDeco = el("g"), gAn
 // ---------------------------------------------------------------- geometry
 const BLOCK_Y = 236, BLOCK_H = 440, BLOCK_BOTTOM = BLOCK_Y + BLOCK_H;      // 676
 const BAND_Y = 700, BAND_H = 160;                                            // 700..860
-const CLOUD = { x: 488, y: 150, w: 912, h: 736 };                            // ..886
-const LOOP_Y = 910;
+const CLOUD = { x: 488, y: 150, w: 912, h: 730 };                            // ..880
+const LOOP_Y = 920;
 const AGENTS_X = 528, ENGINE_X = 976, BLOCK_W = 392, HUMAN_X = 1448, SIDE_W = 320, HUMAN_W = 352;
 const AGENTS_CX = AGENTS_X + BLOCK_W / 2, ENGINE_CX = ENGINE_X + BLOCK_W / 2, HUMAN_CX = HUMAN_X + HUMAN_W / 2;
 const GAP_X = (AGENTS_X + BLOCK_W + ENGINE_X) / 2;                            // 946
@@ -92,9 +92,8 @@ const cloud = el("g", {}, gBack);
 el("rect", { x: CLOUD.x, y: CLOUD.y, width: CLOUD.w, height: CLOUD.h, rx: 26, fill: C.cloud, stroke: C.cloudLine, "stroke-width": 1.5, "stroke-dasharray": "10 8" }, cloud);
 const cloudLabel = el("g", {}, cloud);
 const pillRect = el("rect", { x: 520, y: 132, width: 10, height: 36, rx: 18, fill: "#fff", stroke: C.cloudLine, "stroke-width": 1.5 }, cloudLabel);
-const pillText = fit(txt(544, 157, "Built with the Strands Agents SDK  ·  runs on Amazon Bedrock AgentCore Runtime", { "font-size": 19, "font-weight": 600, fill: C.ink2 }, cloudLabel), 830);
+const pillText = fit(txt(544, 157, "Built with the Strands Agents SDK  ·  Claude on Amazon Bedrock  ·  runs on AgentCore Runtime", { "font-size": 19, "font-weight": 600, fill: C.ink2 }, cloudLabel), 830);
 pillRect.setAttribute("width", measure(pillText) + 48);
-const cloudNote = fit(txt(524, CLOUD.y + CLOUD.h - 10, "one deployment · the same code runs offline", { "font-size": 17, fill: C.dim, class: "mono" }, cloud), 430);
 
 // ---------------------------------------------------------------- icons
 const ICON = {
@@ -164,38 +163,28 @@ const half = (x, icon, title, line1, line2) => {
   el("path", { d: ICON[icon], fill: "none", stroke: C.slate, "stroke-width": 2, "stroke-linecap": "round", "stroke-linejoin": "round", transform: `translate(${x},${BAND_Y + 66}) scale(1.5)` }, band);
   const t = fit(txt(x + 50, BAND_Y + 90, title, { "font-size": 24, "font-weight": 650 }, band), halfW - 90);
   fit(txt(x + 50, BAND_Y + 118, line1, { "font-size": 19, fill: C.ink2 }, band), halfW - 90);
-  fit(txt(x + 50, BAND_Y + 143, line2, { "font-size": 18, fill: C.dim, class: "mono" }, band), halfW - 90);
-  return t;
+  const l2 = fit(txt(x + 50, BAND_Y + 143, line2, { "font-size": 18, fill: C.dim, class: "mono" }, band), halfW - 90);
+  return { t, l2 };
 };
-const ledgerTitle = half(BAND_X + 28, "db", "Append-only ledger", "every event, run and piece of evidence", "SQLite · never edited or deleted");
+const ledgerHalf = half(BAND_X + 28, "db", "Append-only ledger", "every event, run and piece of evidence", "SQLite · never edited or deleted");
+const ledgerTitle = ledgerHalf.t;
 el("rect", { x: BAND_X + halfW, y: BAND_Y + 62, width: 1, height: 84, fill: C.line }, band);
-const memTitle = half(BAND_X + halfW + 30, "memory", "Decision memory", "your past passes and prices, quoted back", "Amazon Bedrock AgentCore Memory");
+const memHalf = half(BAND_X + halfW + 30, "memory", "Decision memory", "your past passes and prices, quoted back", "Amazon Bedrock AgentCore Memory");
+const memTitle = memHalf.t, memLine = memHalf.l2;
 
 // ---------------------------------------------------------------- the three promises
 const PROMISES = [
-  { x: 120, kicker: "AMBIENT", col: C.slate, text: "Watches, follows up on day 3 and day 6, then stops and tells you once. Otherwise silent." },
-  { x: 680, kicker: "RELIABLE", col: C.blue, text: "Policy and guardrails are code, not prompts. Every claim is cited, every run is on the record." },
-  { x: 1240, kicker: "UNDER YOUR CONTROL", col: C.green, text: "A first message to a broker waits for your tap. Anything about money always does." },
+  { x: 120, kicker: "AMBIENT", col: C.slate, text: "Follows up on day 3 and day 6, then tells you once." },
+  { x: 680, kicker: "RELIABLE", col: C.blue, text: "Guardrails in code, not prompts. Every run recorded." },
+  { x: 1240, kicker: "UNDER YOUR CONTROL", col: C.green, text: "First contact and money always wait for your tap." },
 ];
 const promiseEls = PROMISES.map((p) => {
   const g = el("g", {}, gDeco);
-  el("rect", { x: p.x, y: 928, width: 5, height: 92, rx: 2.5, fill: p.col }, g);
-  fit(txt(p.x + 22, 948, p.kicker, { "font-size": 17, "font-weight": 700, fill: p.col, "letter-spacing": 2.4 }, g), 500);
-  wrap(p.x + 22, 980, p.text, 500, { "font-size": 20, fill: C.ink2 }, g, 28);
+  el("rect", { x: p.x, y: 966, width: 5, height: 60, rx: 2.5, fill: p.col }, g);
+  fit(txt(p.x + 22, 986, p.kicker, { "font-size": 17, "font-weight": 700, fill: p.col, "letter-spacing": 2.4 }, g), 520);
+  wrap(p.x + 22, 1016, p.text, 520, { "font-size": 20, fill: C.ink2 }, g, 26);
   return g;
 });
-// platform strip, laid out by measurement
-const PLATFORM = ["Strands Agents SDK", "Amazon Bedrock AgentCore Runtime", "AgentCore Memory", "Amazon Bedrock", "SQLite", "Telegram"];
-const platEls = [];
-{
-  let x = 120;
-  PLATFORM.forEach((s, i) => {
-    // measured bold, since the items turn bold as the narration reaches them
-    const t = txt(x, 1054, s, { "font-size": 19, fill: C.dim, class: "mono", "font-weight": 700 }, gDeco);
-    platEls.push(t); x += measure(t) + 14; t.setAttribute("font-weight", 400);
-    if (i < PLATFORM.length - 1) { const d = txt(x, 1054, "·", { "font-size": 19, fill: C.line }, gDeco); x += measure(d) + 14; }
-  });
-}
 
 // ---------------------------------------------------------------- edges (few, big)
 const EDGES = {
@@ -224,7 +213,7 @@ const labels = [
   edgeLabel((120 + SIDE_W + AGENTS_X) / 2, 384, "package", 84), edgeLabel(GAP_X, 384, "claims", 52),
   edgeLabel((ENGINE_X + BLOCK_W + HUMAN_X) / 2, 384, "verdict", 76),
   edgeLabel(ENGINE_CX + 14, BAND_Y - 6, "record", 120, "start"), edgeLabel(AGENTS_CX - 14, BAND_Y - 6, "recall", 120, "end"),
-  edgeLabel(960, LOOP_Y - 10, "a reply, a price cut, a report → the whole path runs again", 900),
+  edgeLabel(960, LOOP_Y - 12, "a reply, a price cut, a report  →  the whole path runs again", 900),
 ];
 
 // ---------------------------------------------------------------- animation pieces
@@ -301,15 +290,13 @@ function render(f) {
   band.setAttribute("transform", `translate(0,${-4 * (f >= 0.63 ? 1 - win(f, 0.63, 0.66) : 0)})`);
   promiseEls.forEach((g, i) => g.setAttribute("opacity", ease(win(f, 0.05 + i * 0.01, 0.085 + i * 0.01))));
   labels.forEach((t) => t.setAttribute("opacity", ease(win(f, 0.05, 0.08))));
-  platEls.forEach((t, i) => {
-    t.setAttribute("opacity", ease(win(f, 0.05, 0.08)));
-    const lit = f >= 0.89 + i * 0.017;
-    t.setAttribute("fill", lit ? C.ink : C.dim); t.setAttribute("font-weight", lit ? 700 : 400);
-  });
+  // the last beat: the narration names Strands and AgentCore, so the platform pill and the memory line light
   const platBeat = f >= 0.905 && f < 0.99;
   pillRect.setAttribute("stroke", platBeat ? C.ink2 : C.cloudLine);
   pillRect.setAttribute("stroke-width", platBeat ? 2.5 : 1.5);
-  cloudNote.setAttribute("fill", platBeat ? C.ink2 : C.dim);
+  pillText.setAttribute("fill", platBeat ? C.ink : C.ink2);
+  memLine.setAttribute("fill", f >= 0.69 ? C.slate : C.dim);
+  memLine.setAttribute("font-weight", platBeat || (f >= 0.69 && f < 0.78) ? 700 : 400);
   Object.values(edgeEls).forEach((ee) => {
     ee.g.setAttribute("opacity", ease(win(f, 0.05, 0.08)));
     const u = win(f, ee.e.t[0], ee.e.t[1]);
