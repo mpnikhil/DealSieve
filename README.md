@@ -6,7 +6,7 @@ Built with the [Strands Agents SDK](https://strandsagents.com/) for the AWS *Age
 
 ## The story, with real numbers
 
-One property, 8330 Power Inn Road, Sacramento (8-unit small-bay industrial, 20,000 sf), under a frozen policy: $500k equity, 8.0% minimum normalized cap, 1.35x minimum DSCR, 75% maximum LTV, no tenant above 25% of rent.
+One property, 8330 Power Inn Road, Sacramento (8-unit small-bay industrial, 20,000 sf), under a frozen policy: $500k equity, 8.0% minimum normalized cap, 1.35x minimum DSCR (debt service coverage, income divided by loan payments), 75% maximum LTV, no tenant above 25% of rent.
 
 | What arrives | What DealSieve does | You |
 |---|---|---|
@@ -16,6 +16,8 @@ One property, 8330 Power Inn Road, Sacramento (8-unit small-bay industrial, 20,0
 | Silence from the broker | Follows up on Phase I and CAM only, at day 3 and day 6. Stops at day 9. | **Alert 3**, the last one |
 
 Three interruptions across the life of a deal, each because the decision changed. Everything above reproduces offline in about three seconds (`make demo-offline`), and live through Claude, Gemini or Codex as the model.
+
+Terms, for readers outside real estate: the cap rate is the annual return on the purchase price; DSCR is income divided by loan payments; a Phase I is the environmental site assessment; a CAM reconciliation is the yearly true-up of shared building expenses billed to tenants; the Prop 13 reset is California reassessing property tax to the sale price.
 
 ## Why this is not another document-reading copilot
 
