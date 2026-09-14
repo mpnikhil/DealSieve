@@ -10,7 +10,7 @@ Last updated: 2026-09-13 22:00 PDT. Submission deadline: 2026-09-14 17:00 PDT.
 - Live model runs: acts 1-2 through Claude Sonnet, Gemini Flash and Codex; act 3 with photos through Codex.
 
 ## Working Now
-- Final review of the demo video (about 3:25 cut: product-first script, animated architecture segment rendered from architecture/diagram.html, phone recordings of two alerts, the discipline line in the close) and the Devpost submission.
+- Final review of the demo video (3:21 cut: product-first script, animated architecture segment rendered from architecture/overview.html, phone recordings of two alerts, the discipline line in the close) and the Devpost submission.
 
 
 ## Blockers
