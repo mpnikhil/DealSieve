@@ -2,7 +2,7 @@
 
 ## Tagline
 
-The acquisitions agent for small-bay industrial buyers. It works the pipeline; you price the basis.
+The acquisitions agent for small-bay industrial buyers. It works the pipeline; you make the decisions.
 
 ## Elevator pitch
 
@@ -22,6 +22,8 @@ On the demo property (8330 Power Inn Road, Sacramento, an 8-unit small-bay indus
 
 Once approved, the request is delivered to the broker. The broker replies with a Property Condition Report containing photographs. A third Strands agent, the Inspector Agent, reads the text and visually inspects embedded photos showing ponding water and blistering on the 2001 built-up membrane. It answers the open roof question and extracts $90,000 of immediate roof capex. DealSieve automatically re-underwrites on the all-in basis. The purchase price plus capex pushes the total basis to $1,340,000, the cap rate drops to 7.71%, the DSCR to 1.30x, and LTV to 75.2%. The deal moves REVIEW → NEAR (viable below $1,208,108). A second human alert fires with a drafted $42,000 price-credit request. Unanswered requests are followed up on a policy cadence. If the broker goes dark, the loop stalls and alerts the human.
 
+DealSieve also remembers the buyer's own decisions. Every pass, price and approval is written to a decision memory (Amazon Bedrock AgentCore Memory, with a local store as the fallback), and the next alert on the same building quotes it back: "You previously: passed at $1.29M."
+
 The frozen policy also takes the emotion out of the decision. A building the buyer has fallen for has to clear the same numbers as every other package, under a policy version the engine records with every run, so the system never talks anyone into a bad buy.
 
 ## How we built it
@@ -32,7 +34,8 @@ Workstreams against a shared contracts document (`docs/CONTRACTS.md`), so the fi
 - **Persistence** (`dealsieve/persistence/`): SQLite in WAL mode; events, underwriting runs, and document analyses are immutable; concurrency-safe deal/event sequence allocation with `BEGIN IMMEDIATE` (R10); message claiming (R4); deduplication constraints.
 - **Agents** (`dealsieve/agents/`, `dealsieve/models/`): three specialized Strands agents — (1) Acquisition Agent with deterministic code-gated tools, (2) Skeptic Agent for second-opinion risk audit, and (3) Inspector Agent with multimodal vision analyzing inspection PDFs and photos. A custom `CLIModel` Strands provider supports local CLIs (`claude`, `codex`, `agy`), and `ScriptedModel` replays recorded turns for deterministic offline demos and tests.
 - **Diligence & Delivery** (`dealsieve/diligence/`, `dealsieve/outbound/`): deterministic screen blocking unauthorized offers or money language, follow-up cadence advancement, keyword-family answer matching, stall detection, and RFC 822 `.eml` delivery backends.
-- **API/notifications** (`dealsieve/api/`, `dealsieve/notifications/`): FastAPI surface, console and Telegram notifiers with inline-keyboard approval, and the `dealsieve/agentcore_app.py` AWS Bedrock AgentCore entrypoint.
+- **Memory** (`dealsieve/memory/`): decision memory behind one interface, Amazon Bedrock AgentCore Memory in AWS and a local store offline, read by the Skeptic and quoted in every alert.
+- **API/notifications** (`dealsieve/api/`, `dealsieve/notifications/`): FastAPI surface, console and Telegram notifiers with inline-keyboard approval (the alert carries the actual draft email), and the `dealsieve/agentcore_app.py` AWS Bedrock AgentCore entrypoint.
 - **Dashboard** (`frontend/`): Vite + React + TypeScript + Tailwind — overview watchlist sorted by distance to viability, and a deal-detail view with the broker-vs-DealSieve comparison table, viability frontier, diligence tracker, unified correspondence thread, document analysis with photo lightbox, and pending drafts.
 
 ## Challenges
@@ -44,7 +47,7 @@ Keeping the model out of the arithmetic while letting it drive the workflow was 
 - A viability solver that computes a specific, monitorable target price for rejected deals.
 - A tool-gated multi-agent system where the properties that make a hackathon demo scary — the model hallucinating a pass, doing unchecked arithmetic, or double-notifying a human — are structurally impossible.
 - An end-to-end 3-act story (WATCH -> REVIEW -> Diligence & Condition Report -> Capex adjustment & price-credit negotiation) fully tested (`tests/e2e/test_watch_to_review.py` and `tests/e2e/test_diligence_loop.py`) and reproducible offline in 3 seconds.
-- 493 passing tests covering gate boundaries, the amortization schedule, the property-tax reset, bisection convergence on the viability frontier, stress scenarios, identity resolution, evidence-conflict preservation, multimodal document inspection, and the diligence follow-up loop.
+- Hard policy and guardrails in code, not in prompts: 493 tests cover gate boundaries, the amortization schedule, the property-tax reset, bisection convergence on the viability frontier, stress scenarios, identity resolution, evidence-conflict preservation, multimodal document inspection, and the diligence follow-up loop.
 
 ## What we learned
 
@@ -58,4 +61,4 @@ Next steps include monitoring broker emails at mailbox scale, pulling listings f
 
 ## Built with
 
-Python 3.12 · Strands Agents SDK · Pydantic · SQLite · FastAPI · Vite · React · TypeScript · Tailwind CSS · `claude`/`codex`/`agy` CLIs (local model backend) · Amazon Bedrock AgentCore Runtime (deployed) · Amazon Bedrock model backend · Telegram Bot API
+Python 3.12 · Strands Agents SDK · Pydantic · SQLite · FastAPI · Vite · React · TypeScript · Tailwind CSS · `claude`/`codex`/`agy` CLIs (local model backend) · Amazon Bedrock AgentCore Runtime (deployed) · Amazon Bedrock AgentCore Memory · Amazon Bedrock model backend · Telegram Bot API
